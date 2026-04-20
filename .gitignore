@@ -1,0 +1,16 @@
+# .NET / dotnet
+mod/**/build/
+mod/**/bin/
+mod/**/obj/
+
+# macOS
+.DS_Store
+
+# Claude
+.claude/
+
+# Release staging
+release/
+
+# Logs
+*.log
