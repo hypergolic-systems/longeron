@@ -90,7 +90,6 @@ namespace Longeron
             float3 rvWorld = Physics.math.mul(pose.rotation, rv.linear);
             Vector3d fv = Krakensbane.GetFrameVelocity();
 
-            // Accumulate |fExt| across the vessel to detect thrust input.
             float fExtMag = 0f;
             for (int i = 0; i < scene.BodyToPart.Length; i++)
             {
@@ -98,17 +97,26 @@ namespace Longeron
                 fExtMag += Physics.math.length(f.angular) + Physics.math.length(f.linear);
             }
 
+            // Everything the navball / aero / heating read:
+            //   vessel.velocityD = rb.GetPointVelocity(CoM) + FrameVelocity
+            //   vessel.srf_velocity = velocityD - surface rotation at vessel
+            //   vessel.obt_velocity = velocityD mapped into the orbit's frame
+            var pointV = rb != null ? rb.GetPointVelocity(vessel.CoMD) : Vector3.zero;
             Debug.Log(string.Format(
-                "[Longeron/trace] t={0} v={1} rb_pos=({2:F1},{3:F1},{4:F1}) rb_vel=({5:F1},{6:F1},{7:F1}) " +
-                "fv=({8:F1},{9:F1},{10:F1}) root_pos=({11:F1},{12:F1},{13:F1}) " +
-                "root_v_w=({14:F1},{15:F1},{16:F1}) alt={17:F0} obt_v={18:F1} fext={19:F1}",
+                "[Longeron/trace] t={0} v={1} rb_pos=({2:F1},{3:F1},{4:F1}) rb_vel=({5:F2},{6:F2},{7:F2}) " +
+                "rb_pv=({8:F2},{9:F2},{10:F2}) fv=({11:F1},{12:F1},{13:F1}) " +
+                "rv_w=({14:F2},{15:F2},{16:F2}) alt={17:F0} " +
+                "srf_v={18:F2} obt_v={19:F2} vel_d={20:F2} fext={21:F1}",
                 _tick, vessel.vesselName,
                 rb != null ? rb.position.x : 0f, rb != null ? rb.position.y : 0f, rb != null ? rb.position.z : 0f,
                 rb != null ? rb.velocity.x : 0f, rb != null ? rb.velocity.y : 0f, rb != null ? rb.velocity.z : 0f,
+                pointV.x, pointV.y, pointV.z,
                 (float)fv.x, (float)fv.y, (float)fv.z,
-                pose.translation.x, pose.translation.y, pose.translation.z,
                 rvWorld.x, rvWorld.y, rvWorld.z,
-                vessel.altitude, vessel.obt_velocity.magnitude,
+                vessel.altitude,
+                vessel.srf_velocity.magnitude,
+                vessel.obt_velocity.magnitude,
+                vessel.velocityD.magnitude,
                 fExtMag));
         }
 
@@ -145,6 +153,27 @@ namespace Longeron
                 var X = scene.Scene.GetWorldTransform(new BodyId(i));
                 rb.MovePosition(new Vector3(X.translation.x, X.translation.y, X.translation.z));
                 rb.MoveRotation(new Quaternion(X.rotation.x, X.rotation.y, X.rotation.z, X.rotation.w));
+            }
+
+            // Set the root rigidbody's velocity explicitly. KSP computes
+            // vessel.velocityD as rootPart.rb.GetPointVelocity(CoM) +
+            // Krakensbane.FrameVelocity — so for the navball / aero / etc.
+            // to read stable values, rb.velocity must be a deterministic
+            // per-tick write rather than whatever Unity happens to have
+            // inferred from MovePosition deltas (which also collides with
+            // Krakensbane's ChangeWorldVelocity mid-tick).
+            if (scene.BodyToPart.Length > 0)
+            {
+                var rootRb = scene.BodyToPart[0].rb;
+                if (rootRb != null)
+                {
+                    var rv = scene.Scene.Body.rootVelocity;
+                    var rot = scene.Scene.Body.rootPose.rotation;
+                    float3 vWorld = Physics.math.mul(rot, rv.linear);
+                    float3 omWorld = Physics.math.mul(rot, rv.angular);
+                    rootRb.velocity = new Vector3(vWorld.x, vWorld.y, vWorld.z);
+                    rootRb.angularVelocity = new Vector3(omWorld.x, omWorld.y, omWorld.z);
+                }
             }
         }
     }
