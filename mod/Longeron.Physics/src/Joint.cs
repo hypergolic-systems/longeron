@@ -17,15 +17,20 @@ namespace Longeron.Physics
 {
     public enum JointKind : byte
     {
-        Fixed = 0,
+        Fixed    = 0,
         Revolute = 1,
         Prismatic = 2,
+        // 6-DOF joint. Supported only as a root ("floating base"); the joint's
+        // configuration and velocity live in ArticulatedBody.rootPose and
+        // ArticulatedBody.rootVelocity rather than in q[] / qdot[]. A Floating
+        // joint on a non-root body is not a supported configuration.
+        Floating = 3,
     }
 
     public readonly struct Joint
     {
         public readonly JointKind kind;
-        public readonly float3 axis;   // unit vector in body frame; ignored for Fixed
+        public readonly float3 axis;   // unit vector in body frame; ignored for Fixed/Floating
 
         public Joint(JointKind kind, float3 axis)
         {
@@ -36,8 +41,20 @@ namespace Longeron.Physics
         public static Joint Fixed()                  => new Joint(JointKind.Fixed, float3.zero);
         public static Joint Revolute(float3 axis)    => new Joint(JointKind.Revolute,  axis);
         public static Joint Prismatic(float3 axis)   => new Joint(JointKind.Prismatic, axis);
+        public static Joint Floating()               => new Joint(JointKind.Floating, float3.zero);
 
-        public int Dof => kind == JointKind.Fixed ? 0 : 1;
+        public int Dof
+        {
+            get
+            {
+                switch (kind)
+                {
+                    case JointKind.Fixed: return 0;
+                    case JointKind.Floating: return 6;
+                    default: return 1;
+                }
+            }
+        }
 
         // Motion subspace S_i expressed in body frame. Fixed joints have
         // no DOF and callers must not query S on them; return zero.

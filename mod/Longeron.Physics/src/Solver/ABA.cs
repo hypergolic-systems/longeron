@@ -24,18 +24,23 @@ namespace Longeron.Physics
 {
     public static class ABA
     {
-        public readonly struct Scratch
+        public struct Scratch
         {
-            public readonly SpatialMotion[]     v;
-            public readonly SpatialMotion[]     c;
-            public readonly SpatialMatrix6[]    IA;
-            public readonly SpatialForce[]      pA;
-            public readonly SpatialForce[]      U;
-            public readonly float[]             D;
-            public readonly float[]             u;
-            public readonly SpatialMotion[]     a;
-            public readonly float[]             qddot;
-            public readonly SpatialTransform[]  Xup;    // parent body frame → this body frame
+            public SpatialMotion[]     v;
+            public SpatialMotion[]     c;
+            public SpatialMatrix6[]    IA;
+            public SpatialForce[]      pA;
+            public SpatialForce[]      U;
+            public float[]             D;
+            public float[]             u;
+            public SpatialMotion[]     a;
+            public float[]             qddot;
+            public SpatialTransform[]  Xup;    // parent body frame → this body frame
+
+            // Spatial acceleration of the Floating root (6-DOF qddot). Only
+            // meaningful when joint[0].kind == Floating. Integrated into
+            // rootVelocity each Step.
+            public SpatialMotion       rootAccel;
 
             public Scratch(int capacity)
             {
@@ -49,14 +54,17 @@ namespace Longeron.Physics
                 a     = new SpatialMotion[capacity];
                 qddot = new float[capacity];
                 Xup   = new SpatialTransform[capacity];
+                rootAccel = SpatialMotion.zero;
             }
         }
 
         public static Scratch AllocateScratch(int capacity) => new Scratch(capacity);
 
-        // Run all three passes. Populates scratch.qddot[] with joint accelerations.
-        // gravity is in world coordinates (parent-of-root frame).
-        public static void Solve(ArticulatedBody body, float3 gravity, Scratch s)
+        // Run all three passes. Populates scratch.qddot[] with joint accelerations
+        // and scratch.rootAccel (when root is Floating). gravity is in world
+        // coordinates (parent-of-root frame). Scratch is passed by ref because
+        // rootAccel is a value field — pass-by-value would drop the write.
+        public static void Solve(ArticulatedBody body, float3 gravity, ref Scratch s)
         {
             int N = body.Count;
 
@@ -64,8 +72,18 @@ namespace Longeron.Physics
             for (int i = 0; i < N; i++)
             {
                 Joint j = body.joint[i];
-                SpatialTransform Xj = j.JointTransform(body.q[i]);
-                SpatialTransform Xup = Xj * body.Xtree[i];
+
+                SpatialTransform Xup;
+                if (j.kind == JointKind.Floating)
+                {
+                    // Floating root: the "joint" transform IS the stored rootPose
+                    // (world → body 0). Xtree[0] is ignored.
+                    Xup = body.rootPose;
+                }
+                else
+                {
+                    Xup = j.JointTransform(body.q[i]) * body.Xtree[i];
+                }
                 s.Xup[i] = Xup;
 
                 SpatialMotion vParentInBodyFrame = body.parent[i] == -1
@@ -73,22 +91,31 @@ namespace Longeron.Physics
                     : Xup.TransformMotion(s.v[body.parent[i]]);
 
                 SpatialMotion vJoint;
-                if (j.kind == JointKind.Fixed)
+                switch (j.kind)
                 {
-                    vJoint = SpatialMotion.zero;
-                    s.v[i] = vParentInBodyFrame;
-                    s.c[i] = SpatialMotion.zero;
-                }
-                else
-                {
-                    SpatialMotion S = j.MotionSubspace();
-                    vJoint = S * body.qdot[i];
-                    s.v[i] = vParentInBodyFrame + vJoint;
-                    // c[i] = v[i] × (S·qdot)  (spatial motion cross product)
-                    s.c[i] = SpatialCross.CrossMotion(s.v[i], vJoint);
+                    case JointKind.Fixed:
+                        vJoint = SpatialMotion.zero;
+                        s.v[i] = vParentInBodyFrame;
+                        s.c[i] = SpatialMotion.zero;
+                        break;
+
+                    case JointKind.Floating:
+                        // Root has no parent velocity to add; state lives in rootVelocity.
+                        // c[0] = v × (S·qdot) = v × v = 0 (motion cross with itself).
+                        s.v[i] = body.rootVelocity;
+                        s.c[i] = SpatialMotion.zero;
+                        vJoint = body.rootVelocity;
+                        break;
+
+                    default: // Revolute / Prismatic
+                        SpatialMotion S = j.MotionSubspace();
+                        vJoint = S * body.qdot[i];
+                        s.v[i] = vParentInBodyFrame + vJoint;
+                        s.c[i] = SpatialCross.CrossMotion(s.v[i], vJoint);
+                        break;
                 }
 
-                // Body inertia as 6×6 (needed for rank-1 updates in pass 2).
+                // Body inertia as 6×6 (needed for rank-1 updates / 6×6 solve).
                 s.IA[i] = SpatialMatrix6.FromInertia(body.I[i]);
 
                 // Velocity-dependent bias: v ×* (I·v) minus external wrench.
@@ -103,16 +130,18 @@ namespace Longeron.Physics
             //       (needed in Pass 3 whether or not we accumulate into a parent);
             //   (b) if has parent, transform the reduced IA/pA into parent's frame
             //       and accumulate.
-            // The root executes (a) but skips (b).
+            // Floating root: neither (a) nor (b) — its reduction is the full 6×6
+            // solve in Pass 3, and it has no parent.
             for (int i = N - 1; i >= 0; i--)
             {
                 Joint j = body.joint[i];
                 SpatialMatrix6 IA_a;
                 SpatialForce pA_a;
 
-                if (j.kind == JointKind.Fixed)
+                if (j.kind == JointKind.Fixed || j.kind == JointKind.Floating)
                 {
-                    // No DOF — propagate the articulated quantities rigidly.
+                    // No rank-1 reduction: Fixed has no DOF, Floating's
+                    // reduction is 6×6 and handled in Pass 3.
                     IA_a = s.IA[i];
                     pA_a = s.pA[i];
                 }
@@ -150,18 +179,34 @@ namespace Longeron.Physics
 
                 SpatialMotion aProp = s.Xup[i].TransformMotion(aParent) + s.c[i];
 
-                if (j.kind == JointKind.Fixed)
+                switch (j.kind)
                 {
-                    s.a[i] = aProp;
-                    s.qddot[i] = 0f;
-                }
-                else
-                {
-                    // qddot_i = (u_i - U_i^T · aProp) / D_i
-                    float qddot_i = (s.u[i] - SpatialCross.Dot(s.U[i], aProp)) / s.D[i];
-                    s.qddot[i] = qddot_i;
-                    SpatialMotion S = j.MotionSubspace();
-                    s.a[i] = aProp + S * qddot_i;
+                    case JointKind.Fixed:
+                        s.a[i] = aProp;
+                        s.qddot[i] = 0f;
+                        break;
+
+                    case JointKind.Floating:
+                    {
+                        // 6-DOF joint reduction: solve IA · qddot = -pA - IA·aProp.
+                        // Then a[0] = aProp + qddot = -IA^{-1}·pA.
+                        SpatialForce Ia = s.IA[i].Mul(aProp);
+                        SpatialForce rhs = -s.pA[i] - Ia;
+                        SpatialMotion qddot = s.IA[i].Solve6(rhs);
+                        s.rootAccel = qddot;
+                        s.a[i] = aProp + qddot;
+                        s.qddot[i] = 0f;
+                        break;
+                    }
+
+                    default: // Revolute / Prismatic
+                    {
+                        float qddot_i = (s.u[i] - SpatialCross.Dot(s.U[i], aProp)) / s.D[i];
+                        s.qddot[i] = qddot_i;
+                        SpatialMotion S = j.MotionSubspace();
+                        s.a[i] = aProp + S * qddot_i;
+                        break;
+                    }
                 }
             }
         }

@@ -43,24 +43,34 @@ namespace Longeron.Physics
 
         public static Scratch AllocateScratch(int capacity) => new Scratch(capacity);
 
-        // Populate s.tau[] given the body's current (q, qdot) and a supplied
-        // qddot[] array (indexed per body, 0 for Fixed joints).
+        // Populate s.tau[] given the body's current (q, qdot) and supplied
+        // joint accelerations. `qddot` carries scalars per 1-DOF joint (0 for
+        // Fixed); `rootAccel` is the spatial acceleration of a Floating root
+        // (ignored if root is not Floating).
         public static void Solve(
             ArticulatedBody body,
             float3 gravity,
             float[] qddot,
-            Scratch s)
+            Scratch s,
+            SpatialMotion rootAccel = default)
         {
             int N = body.Count;
 
-            // Pass 1: base → tip.
-            // Base acceleration encodes gravity (same trick as ABA).
+            // Pass 1: base → tip. Base acceleration encodes gravity (gravity trick).
             SpatialMotion aWorld = new SpatialMotion(float3.zero, -gravity);
 
             for (int i = 0; i < N; i++)
             {
                 Joint j = body.joint[i];
-                s.Xup[i] = j.JointTransform(body.q[i]) * body.Xtree[i];
+
+                if (j.kind == JointKind.Floating)
+                {
+                    s.Xup[i] = body.rootPose;
+                }
+                else
+                {
+                    s.Xup[i] = j.JointTransform(body.q[i]) * body.Xtree[i];
+                }
 
                 SpatialMotion vParent = body.parent[i] == -1
                     ? SpatialMotion.zero
@@ -72,18 +82,29 @@ namespace Longeron.Physics
                 SpatialMotion vParentInBody = s.Xup[i].TransformMotion(vParent);
                 SpatialMotion aParentInBody = s.Xup[i].TransformMotion(aParent);
 
-                if (j.kind == JointKind.Fixed)
+                switch (j.kind)
                 {
-                    s.v[i] = vParentInBody;
-                    s.a[i] = aParentInBody;
-                }
-                else
-                {
-                    SpatialMotion S = j.MotionSubspace();
-                    SpatialMotion vJ = S * body.qdot[i];
-                    s.v[i] = vParentInBody + vJ;
-                    // a = aParent + S·qddot + v × vJ  (Coriolis from joint motion)
-                    s.a[i] = aParentInBody + S * qddot[i] + SpatialCross.CrossMotion(s.v[i], vJ);
+                    case JointKind.Fixed:
+                        s.v[i] = vParentInBody;
+                        s.a[i] = aParentInBody;
+                        break;
+
+                    case JointKind.Floating:
+                        // Root: v comes from stored rootVelocity; a is supplied
+                        // rootAccel plus aParent (world aWorld transformed in);
+                        // c (Coriolis) is 0 for v × v.
+                        s.v[i] = body.rootVelocity;
+                        s.a[i] = aParentInBody + rootAccel;
+                        break;
+
+                    default:
+                    {
+                        SpatialMotion S = j.MotionSubspace();
+                        SpatialMotion vJ = S * body.qdot[i];
+                        s.v[i] = vParentInBody + vJ;
+                        s.a[i] = aParentInBody + S * qddot[i] + SpatialCross.CrossMotion(s.v[i], vJ);
+                        break;
+                    }
                 }
 
                 SpatialForce Iv = body.I[i].Mul(s.v[i]);
@@ -95,10 +116,19 @@ namespace Longeron.Physics
             for (int i = N - 1; i >= 0; i--)
             {
                 Joint j = body.joint[i];
-                if (j.kind == JointKind.Fixed)
-                    s.tau[i] = 0f;
-                else
-                    s.tau[i] = SpatialCross.Dot(s.f[i], j.MotionSubspace());
+                switch (j.kind)
+                {
+                    case JointKind.Fixed:
+                    case JointKind.Floating:
+                        // Fixed: no DOF. Floating: 6-vector residual wrench; we
+                        // don't expose it per tau[] — the reciprocity test
+                        // asserts 1-DOF joints only. Leave tau[i] at 0.
+                        s.tau[i] = 0f;
+                        break;
+                    default:
+                        s.tau[i] = SpatialCross.Dot(s.f[i], j.MotionSubspace());
+                        break;
+                }
 
                 if (body.parent[i] != -1)
                     s.f[body.parent[i]] = s.f[body.parent[i]] + s.Xup[i].InverseTransformForce(s.f[i]);

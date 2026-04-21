@@ -41,6 +41,15 @@ namespace Longeron.Physics
         public float[] qdot;
         public SpatialForce[] fExt;
 
+        // Floating-base state — meaningful only when joint[0].kind == Floating.
+        // For other root kinds these are unused and stay at identity / zero.
+        //   rootPose:     world-to-root spatial transform. translation is body 0's
+        //                 origin expressed in world coords; rotation is body 0's
+        //                 orientation active-wise relative to world.
+        //   rootVelocity: body 0's spatial velocity expressed in body 0's frame.
+        public SpatialTransform rootPose = SpatialTransform.identity;
+        public SpatialMotion    rootVelocity = SpatialMotion.zero;
+
         public ArticulatedBody(int initialCapacity = 16)
         {
             Capacity = initialCapacity < 1 ? 1 : initialCapacity;

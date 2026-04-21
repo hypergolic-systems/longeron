@@ -96,5 +96,78 @@ namespace Longeron.Physics
         // Inverse-transform: if M is in B, apply inverse of X_A→B to get M in A.
         public SpatialMatrix6 InverseTransform(SpatialTransform X) =>
             Transform(X.Inverse());
+
+        // Solve M · x = rhs for x, where M is treated as 6×6 with the angular
+        // block indexing 0..2 and linear block indexing 3..5 (matching
+        // SpatialMotion / SpatialForce field layout).
+        //
+        // Gaussian elimination with partial pivoting on a flat row-major
+        // augmented matrix. Allocates two small arrays per call — acceptable
+        // at the rate this fires (once per Floating root per tick). Can be
+        // stackalloc'd later for Burst.
+        public SpatialMotion Solve6(SpatialForce rhs)
+        {
+            var A = new float[42]; // 6 rows × (6 + 1) cols
+
+            // Fill 6×6 M (block form → flat row-major).
+            for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+            {
+                A[i * 7 + j]             = a[i, j];
+                A[i * 7 + (j + 3)]       = b[i, j];
+                A[(i + 3) * 7 + j]       = c[i, j];
+                A[(i + 3) * 7 + (j + 3)] = d[i, j];
+            }
+
+            // rhs column: angular then linear.
+            A[0 * 7 + 6] = rhs.angular.x;
+            A[1 * 7 + 6] = rhs.angular.y;
+            A[2 * 7 + 6] = rhs.angular.z;
+            A[3 * 7 + 6] = rhs.linear.x;
+            A[4 * 7 + 6] = rhs.linear.y;
+            A[5 * 7 + 6] = rhs.linear.z;
+
+            for (int col = 0; col < 6; col++)
+            {
+                // Partial-pivot: find the row with max |A[row, col]| in [col, 6).
+                int pivot = col;
+                float maxAbs = math.abs(A[col * 7 + col]);
+                for (int row = col + 1; row < 6; row++)
+                {
+                    float val = math.abs(A[row * 7 + col]);
+                    if (val > maxAbs) { maxAbs = val; pivot = row; }
+                }
+                if (pivot != col)
+                {
+                    for (int k = col; k < 7; k++)
+                    {
+                        float tmp = A[col * 7 + k];
+                        A[col * 7 + k] = A[pivot * 7 + k];
+                        A[pivot * 7 + k] = tmp;
+                    }
+                }
+
+                float pivotVal = A[col * 7 + col];
+                for (int row = col + 1; row < 6; row++)
+                {
+                    float factor = A[row * 7 + col] / pivotVal;
+                    for (int k = col; k < 7; k++)
+                        A[row * 7 + k] -= factor * A[col * 7 + k];
+                }
+            }
+
+            // Back-substitute.
+            var x = new float[6];
+            for (int i = 5; i >= 0; i--)
+            {
+                float sum = A[i * 7 + 6];
+                for (int j = i + 1; j < 6; j++) sum -= A[i * 7 + j] * x[j];
+                x[i] = sum / A[i * 7 + i];
+            }
+
+            return new SpatialMotion(
+                new float3(x[0], x[1], x[2]),
+                new float3(x[3], x[4], x[5]));
+        }
     }
 }

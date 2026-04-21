@@ -32,8 +32,8 @@ namespace Longeron.Physics.Tests
                     (float)(rng.NextDouble() * 2 - 1),
                     (float)(rng.NextDouble() * 2 - 1));
 
-                ABA.Solve(body, gravity, abaScratch);
-                Rnea.Solve(body, gravity, abaScratch.qddot, rneaScratch);
+                ABA.Solve(body, gravity, ref abaScratch);
+                Rnea.Solve(body, gravity, abaScratch.qddot, rneaScratch, abaScratch.rootAccel);
 
                 for (int i = 0; i < body.Count; i++)
                 {
@@ -53,18 +53,15 @@ namespace Longeron.Physics.Tests
 
             for (int i = 0; i < N; i++)
             {
-                // Parent: -1 for root, otherwise any earlier body (random).
                 BodyId parent = i == 0 ? BodyId.None : new BodyId(rng.Next(0, i));
-                Joint j = RandomJoint(rng);
+                Joint j = i == 0 ? RandomRootJoint(rng) : RandomInternalJoint(rng);
 
-                // Random inertia: mass 0.1–5, small COM offset, diagonal inertia.
                 float m = 0.1f + (float)rng.NextDouble() * 5f;
                 float3 com = RandomFloat3(rng, 0.3f);
                 float iDiag = 0.05f + (float)rng.NextDouble() * 0.5f;
                 var inertia = new SpatialInertia(m, com,
                     new float3x3(new float3(iDiag, 0, 0), new float3(0, iDiag, 0), new float3(0, 0, iDiag)));
 
-                // Random Xtree: small rotation + translation.
                 var axis = math.normalize(RandomFloat3(rng, 1f) + float3.unitX * 0.01f);
                 var rot = math.axisAngle(axis, (float)(rng.NextDouble() * 2f - 1f));
                 var trans = RandomFloat3(rng, 0.8f);
@@ -76,7 +73,22 @@ namespace Longeron.Physics.Tests
             return body;
         }
 
-        static Joint RandomJoint(System.Random rng)
+        // Root can be any of the four kinds — including Floating, which is only
+        // supported at the root.
+        static Joint RandomRootJoint(System.Random rng)
+        {
+            int pick = rng.Next(0, 4);
+            switch (pick)
+            {
+                case 0: return Joint.Fixed();
+                case 1: return Joint.Floating();
+                default:
+                    var axis = math.normalize(RandomFloat3(rng, 1f) + float3.unitX * 0.01f);
+                    return pick == 2 ? Joint.Revolute(axis) : Joint.Prismatic(axis);
+            }
+        }
+
+        static Joint RandomInternalJoint(System.Random rng)
         {
             int pick = rng.Next(0, 3);
             if (pick == 0) return Joint.Fixed();
@@ -86,9 +98,20 @@ namespace Longeron.Physics.Tests
 
         static void ApplyRandomState(ArticulatedBody body, System.Random rng)
         {
+            // For Floating root, populate rootPose + rootVelocity.
+            if (body.joint[0].kind == JointKind.Floating)
+            {
+                var axis = math.normalize(RandomFloat3(rng, 1f) + float3.unitX * 0.01f);
+                body.rootPose = new SpatialTransform(
+                    math.axisAngle(axis, (float)(rng.NextDouble() * 2f - 1f)),
+                    RandomFloat3(rng, 1f));
+                body.rootVelocity = new SpatialMotion(RandomFloat3(rng, 0.5f), RandomFloat3(rng, 0.5f));
+            }
+
             for (int i = 0; i < body.Count; i++)
             {
-                if (body.joint[i].kind != JointKind.Fixed)
+                var kind = body.joint[i].kind;
+                if (kind == JointKind.Revolute || kind == JointKind.Prismatic)
                 {
                     body.q[i]    = (float)(rng.NextDouble() * 2 - 1);
                     body.qdot[i] = (float)(rng.NextDouble() * 2 - 1);
