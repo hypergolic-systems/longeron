@@ -24,6 +24,12 @@ namespace Longeron.Integration
         public Dictionary<Part, BodyId> PartToBody { get; private set; }
         public bool RootVelocitySeeded { get; private set; }
 
+        // Last-tick Krakensbane FrameVelocity. Used to detect the ΔFV that
+        // Krakensbane drains from rigidbodies each tick and apply the same
+        // drain to rootVelocity, keeping our solver aligned with Unity's
+        // translating frame.
+        public float3 LastFrameVelocity;
+
         private VesselScene(Vessel vessel, ArticulatedScene scene, Part[] bodyToPart, Dictionary<Part, BodyId> partToBody)
         {
             Vessel = vessel;
@@ -31,6 +37,48 @@ namespace Longeron.Integration
             BodyToPart = bodyToPart;
             PartToBody = partToBody;
             RootVelocitySeeded = false;
+            LastFrameVelocity = float3.zero;
+        }
+
+        // Krakensbane bridge. Call once per FixedUpdate *before* Scene.Step.
+        //   1. Subtract (thisFV - lastFV) from rootVelocity. Matches the drain
+        //      Krakensbane just applied to rb.velocity via ChangeWorldVelocity.
+        //   2. Subtract thisFV * dt from rootPose.translation. Compensates for
+        //      FloatingOrigin's translating Unity's world by -FrameVel*dt each
+        //      tick while Krakensbane is engaged.
+        // Snap rootPose.translation to the root rigidbody's current Unity
+        // position. This is how we reconcile with stock's absolute-position
+        // authority — FloatingOrigin can teleport rb.position between
+        // ticks, Krakensbane can translate it; we just follow.
+        public void SyncRootPoseFromRigidbody()
+        {
+            if (BodyToPart.Length == 0) return;
+            var rb = BodyToPart[0].rb;
+            if (rb == null) return;
+            var pos = rb.position;
+            var rot = rb.rotation;
+            Scene.Body.rootPose = new SpatialTransform(
+                new Physics.quaternion(rot.x, rot.y, rot.z, rot.w),
+                new float3(pos.x, pos.y, pos.z));
+        }
+
+        // Drain the Krakensbane ΔFV from rootVelocity — keeps our solver's
+        // velocity consistent with what Krakensbane just took out of rb via
+        // ChangeWorldVelocity. Position shifts are handled by
+        // SyncRootPoseFromRigidbody above; this pass is velocity-only.
+        public void ApplyKrakensbaneStep(float dt)
+        {
+            Vector3d fv = Krakensbane.GetFrameVelocity();
+            float3 thisFV = new float3((float)fv.x, (float)fv.y, (float)fv.z);
+            float3 deltaFV = thisFV - LastFrameVelocity;
+
+            var qInv = math.inverse(Scene.Body.rootPose.rotation);
+            float3 deltaBody = math.mul(qInv, deltaFV);
+            Scene.Body.rootVelocity = new SpatialMotion(
+                Scene.Body.rootVelocity.angular,
+                Scene.Body.rootVelocity.linear - deltaBody);
+
+            LastFrameVelocity = thisFV;
         }
 
         // Copy the root rigidbody's current velocity (world-frame) into the
@@ -49,13 +97,25 @@ namespace Longeron.Integration
             var rb = BodyToPart[0].rb;
             if (rb == null) return;
 
-            // Spike milestone: start at rest in the Unity frame. Any residual
-            // `rb.velocity` (e.g. the tiny Kerbin-rotation tangential on the pad)
-            // would produce visible drift when combined with zero gravity.
-            // Proper handling is `rb.velocity + Krakensbane.Instance.FrameVelocity`
-            // and a Krakensbane-aware writeback — out of spike scope.
-            Scene.Body.rootVelocity = SpatialMotion.zero;
+            // rootVelocity lives in "Unity's current frame" — same frame
+            // Krakensbane's per-tick ΔFV operates in. Seed from rb.velocity
+            // (which is what Krakensbane drains *from*). For a landed vessel
+            // that's ~0 (Kerbin rotates beneath; rb frame rotates with it).
+            // For high-speed / orbital vessels, Krakensbane has already
+            // drained rb.velocity and parked the excess in FrameVelocity.
+            var qInv = math.inverse(Scene.Body.rootPose.rotation);
+            var worldV  = rb.velocity;
+            var worldOm = rb.angularVelocity;
+            float3 vBody  = math.mul(qInv, new float3(worldV.x, worldV.y, worldV.z));
+            float3 omBody = math.mul(qInv, new float3(worldOm.x, worldOm.y, worldOm.z));
+            Scene.Body.rootVelocity = new SpatialMotion(omBody, vBody);
             Scene.Body.rootPose = ToSpatialTransform(BodyToPart[0].transform);
+
+            // Snapshot Krakensbane's current FrameVelocity as the baseline so
+            // ApplyKrakensbaneStep's first ΔFV is zero (no spurious drain).
+            Vector3d fv = Krakensbane.GetFrameVelocity();
+            LastFrameVelocity = new float3((float)fv.x, (float)fv.y, (float)fv.z);
+
             RootVelocitySeeded = true;
         }
 
