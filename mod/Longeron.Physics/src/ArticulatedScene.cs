@@ -13,12 +13,14 @@ namespace Longeron.Physics
     {
         readonly ArticulatedBody body;
         ABA.Scratch scratch;
+        Rnea.Scratch rneaScratch;
         public float3 gravity;   // world frame; (0, 0, 0) = no gravity
 
         public ArticulatedScene(int initialCapacity = 16)
         {
             body = new ArticulatedBody(initialCapacity);
             scratch = ABA.AllocateScratch(initialCapacity);
+            rneaScratch = Rnea.AllocateScratch(initialCapacity);
             gravity = float3.zero;
         }
 
@@ -44,6 +46,12 @@ namespace Longeron.Physics
         public void Step(float dt)
         {
             ABA.Solve(body, gravity, ref scratch);
+            // Run RNEA with the ABA-computed accelerations so each body's
+            // reaction wrench at its parent-side joint is available for
+            // diagnostics / break detection via GetJointReactionWrench().
+            // RNEA's Pass 2 populates scratch.f[i] as the spatial force
+            // transmitted through joint i, in body i's frame.
+            Rnea.Solve(body, gravity, scratch.qddot, rneaScratch, scratch.rootAccel);
 
             // 1-DOF joints: classic q-qdot advance. Fixed joints skipped.
             for (int i = 0; i < body.Count; i++)
@@ -79,6 +87,15 @@ namespace Longeron.Physics
         // Spatial velocity of body b in body b's frame.
         public SpatialMotion GetSpatialVelocity(BodyId b) => scratch.v[b.index];
 
+        // Spatial reaction wrench at body b's parent-side joint, in body b's
+        // frame. Populated each Step() from RNEA pass 2. For the root body
+        // this is the net external wrench required to hold the base in its
+        // current motion (normally ~0 for a Floating root). For a Fixed or
+        // low-DOF child this is the total wrench the joint is transmitting
+        // from the subtree into its parent — compare against breakForce /
+        // breakTorque to detect joint failure.
+        public SpatialForce GetJointReactionWrench(BodyId b) => rneaScratch.f[b.index];
+
         // Body-to-world spatial transform. Composed by walking the parent
         // chain — X_world_to_body = Xup[i] ∘ Xup[parent[i]] ∘ ... We then
         // invert to get body → world.
@@ -111,8 +128,8 @@ namespace Longeron.Physics
 
         void EnsureScratchCapacity(int cap)
         {
-            if (scratch.v.Length >= cap) return;
-            scratch = ABA.AllocateScratch(cap);
+            if (scratch.v.Length < cap) scratch = ABA.AllocateScratch(cap);
+            if (rneaScratch.v.Length < cap) rneaScratch = Rnea.AllocateScratch(cap);
         }
     }
 }

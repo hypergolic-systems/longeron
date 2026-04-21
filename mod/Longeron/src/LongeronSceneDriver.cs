@@ -97,27 +97,35 @@ namespace Longeron
                 fExtMag += Physics.math.length(f.angular) + Physics.math.length(f.linear);
             }
 
-            // Everything the navball / aero / heating read:
-            //   vessel.velocityD = rb.GetPointVelocity(CoM) + FrameVelocity
-            //   vessel.srf_velocity = velocityD - surface rotation at vessel
-            //   vessel.obt_velocity = velocityD mapped into the orbit's frame
+            // Per-joint reaction wrench: for each body, the force+torque the
+            // joint transmits from its subtree into its parent. Index 0 is
+            // root (typically ~0 for Floating), 1.. are children. Format:
+            //   jw[i]=L<lin_mag>,T<ang_mag>
+            var sb = new System.Text.StringBuilder();
+            int nToLog = System.Math.Min(scene.BodyToPart.Length, 6);
+            for (int i = 0; i < nToLog; i++)
+            {
+                var jw = scene.Scene.GetJointReactionWrench(new BodyId(i));
+                float linMag = Physics.math.length(jw.linear);
+                float angMag = Physics.math.length(jw.angular);
+                if (sb.Length > 0) sb.Append(' ');
+                sb.AppendFormat("jw[{0}]=L{1:F1},T{2:F1}", i, linMag, angMag);
+            }
+
             var pointV = rb != null ? rb.GetPointVelocity(vessel.CoMD) : Vector3.zero;
             Debug.Log(string.Format(
                 "[Longeron/trace] t={0} v={1} rb_pos=({2:F1},{3:F1},{4:F1}) rb_vel=({5:F2},{6:F2},{7:F2}) " +
-                "rb_pv=({8:F2},{9:F2},{10:F2}) fv=({11:F1},{12:F1},{13:F1}) " +
-                "rv_w=({14:F2},{15:F2},{16:F2}) alt={17:F0} " +
-                "srf_v={18:F2} obt_v={19:F2} vel_d={20:F2} fext={21:F1}",
+                "fv=({8:F1},{9:F1},{10:F1}) alt={11:F0} " +
+                "srf_v={12:F2} vel_d={13:F2} fext={14:F1} {15}",
                 _tick, vessel.vesselName,
                 rb != null ? rb.position.x : 0f, rb != null ? rb.position.y : 0f, rb != null ? rb.position.z : 0f,
                 rb != null ? rb.velocity.x : 0f, rb != null ? rb.velocity.y : 0f, rb != null ? rb.velocity.z : 0f,
-                pointV.x, pointV.y, pointV.z,
                 (float)fv.x, (float)fv.y, (float)fv.z,
-                rvWorld.x, rvWorld.y, rvWorld.z,
                 vessel.altitude,
                 vessel.srf_velocity.magnitude,
-                vessel.obt_velocity.magnitude,
                 vessel.velocityD.magnitude,
-                fExtMag));
+                fExtMag,
+                sb.ToString()));
         }
 
         // VesselModule.OnGoOffRails can fire before part rigidbodies are
