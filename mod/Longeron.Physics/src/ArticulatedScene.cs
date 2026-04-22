@@ -102,13 +102,118 @@ namespace Longeron.Physics
             }
         }
 
-        // PGS contact impulse application. Currently a skeleton — the
-        // iteration loop lands in Phase B step 4. Leaving the hook in place
-        // keeps the integrate-after-impulse ordering correct even when the
-        // body is still empty.
+        // PGS contact-impulse loop. Operates on the Floating root's spatial
+        // velocity (body frame). Each contact i is represented by:
+        //   J_i : row 1×6, body-frame Jacobian mapping rootVelocity to the
+        //         contact point's normal-projected velocity.
+        //         J_i = [ (r × n), n ]   (angular | linear, spatial-force convention)
+        //   ΔV_i = IA_root⁻¹ · J_iᵀ  — the rootVelocity increment produced by
+        //                              a unit λ impulse at this contact.
+        //   m_eff_i = 1 / (J_i · ΔV_i) — the contact-frame effective mass
+        //                               along the normal direction.
+        //
+        // IA_root is the articulated-body inertia ABA Pass 2 just computed,
+        // which for an all-Fixed-joint subtree gives us the whole assembly's
+        // effective inertia at the root — free of approximation.
+        //
+        // Inner loop per iteration: recompute current v_n, compare to the
+        // Baumgarte target (positive separation proportional to penetration
+        // depth), compute the required impulse delta, project accumulated λ
+        // to non-negative, apply the net impulse via rootVelocity += δλ · ΔV.
+        //
+        // Per-contact scratch is stack-allocated to the constraint-solver
+        // scratch buffers so the hot loop never allocates.
+
+        ContactScratch contactScratch;
+
+        struct ContactScratch
+        {
+            public SpatialForce[]  J_T;
+            public SpatialMotion[] dV;
+            public float[]         mEff;
+            public float[]         lambda;
+            public int Capacity => J_T != null ? J_T.Length : 0;
+
+            public void EnsureCapacity(int n)
+            {
+                if (Capacity >= n) return;
+                int cap = Capacity == 0 ? 16 : Capacity * 2;
+                while (cap < n) cap *= 2;
+                J_T    = new SpatialForce[cap];
+                dV     = new SpatialMotion[cap];
+                mEff   = new float[cap];
+                lambda = new float[cap];
+            }
+        }
+
+        const int   PGS_ITERATIONS = 15;
+        const float BAUMGARTE_BETA = 0.2f;
+
         void ApplyContactImpulses(IList<ContactConstraint> contacts, float dt)
         {
-            // Intentional no-op until PGS lands. Contacts are discarded.
+            int N = contacts.Count;
+            if (N == 0) return;
+            if (body.joint[0].kind != JointKind.Floating) return;
+
+            contactScratch.EnsureCapacity(N);
+
+            var IA_root = scratch.IA[0];
+            var Rinv = math.inverse(body.rootPose.rotation);
+            var rootOrigin = body.rootPose.translation;
+
+            // --- Pre-pass: per-contact Jacobian, ΔV response, effective mass.
+            for (int i = 0; i < N; i++)
+            {
+                var c = contacts[i];
+                float3 r_body = math.mul(Rinv, c.point - rootOrigin);
+                float3 n_body = math.mul(Rinv, c.normal);
+                float3 rxn    = math.cross(r_body, n_body);
+
+                var jt = new SpatialForce(rxn, n_body);
+                var dv = IA_root.Solve6(jt);
+                float jdv = math.dot(rxn, dv.angular) + math.dot(n_body, dv.linear);
+
+                contactScratch.J_T[i]    = jt;
+                contactScratch.dV[i]     = dv;
+                contactScratch.mEff[i]   = jdv > 1e-9f ? 1f / jdv : 0f;
+                contactScratch.lambda[i] = 0f;
+            }
+
+            // --- PGS iterations. Each pass walks all contacts in order,
+            //     applying whatever correction is needed given the accumulated
+            //     impulses from prior passes. Typical convergence: a handful
+            //     of contacts settle in 5-10 iterations, 15 is a conservative
+            //     cap until we have a real convergence tolerance.
+            for (int iter = 0; iter < PGS_ITERATIONS; iter++)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    float mEff = contactScratch.mEff[i];
+                    if (mEff <= 0f) continue;
+
+                    var c = contacts[i];
+                    var jt = contactScratch.J_T[i];
+                    var dv = contactScratch.dV[i];
+
+                    // Current normal-directional velocity at contact.
+                    float v_n = math.dot(jt.angular, body.rootVelocity.angular)
+                              + math.dot(jt.linear,  body.rootVelocity.linear);
+
+                    // Baumgarte-style position drift correction. Push-out
+                    // velocity proportional to current penetration; clamped
+                    // to non-negative so "already separating fast" doesn't
+                    // reduce the target.
+                    float target_v_n = math.max(0f, BAUMGARTE_BETA * c.depth / dt);
+
+                    float delta = mEff * (target_v_n - v_n);
+                    float newLambda = math.max(0f, contactScratch.lambda[i] + delta);
+                    float actualDelta = newLambda - contactScratch.lambda[i];
+                    contactScratch.lambda[i] = newLambda;
+
+                    // Apply the impulse as a root-velocity delta.
+                    body.rootVelocity = body.rootVelocity + actualDelta * dv;
+                }
+            }
         }
 
         // Spatial acceleration of body b in body b's frame, from the most
