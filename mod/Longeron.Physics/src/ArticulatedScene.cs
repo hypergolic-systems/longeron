@@ -6,6 +6,8 @@
 // parent chain to compose the body-to-world transform on demand.
 
 using System;
+using System.Collections.Generic;
+using Longeron.Physics.Contact;
 
 namespace Longeron.Physics
 {
@@ -42,8 +44,21 @@ namespace Longeron.Physics
         public void SetGravity(float3 g) => gravity = g;
         public void Validate() => body.Validate();
 
-        // Single forward-dynamics step with hardcoded semi-implicit Euler.
-        public void Step(float dt)
+        // Single forward-dynamics step, no contacts. Equivalent to
+        // StepWithContacts(null, dt). Kept as a convenience + stable test
+        // surface for the solver-only test suite.
+        public void Step(float dt) => StepWithContacts(null, dt);
+
+        // Forward dynamics + (optional) contact constraint application +
+        // semi-implicit Euler integration.
+        //
+        // Contract: when `contacts` is null or empty, output matches Step(dt)
+        // exactly (all pre-existing solver tests verify this). When contacts
+        // are provided, the PGS loop runs between the ABA free-dynamics
+        // computation and the integration step, applying normal (and, once
+        // implemented, friction) impulses that satisfy the contact
+        // inequalities before positions advance.
+        public void StepWithContacts(IList<ContactConstraint> contacts, float dt)
         {
             ABA.Solve(body, gravity, ref scratch);
             // Run RNEA with the ABA-computed accelerations so each body's
@@ -62,11 +77,18 @@ namespace Longeron.Physics
                 body.q[i]    += body.qdot[i] * dt;
             }
 
-            // Floating root: integrate rootVelocity (body frame) via semi-implicit
-            // Euler, then advance rootPose by the SE(3) first-order increment.
+            // Floating root: predict free-dynamics velocity first, then let
+            // the constraint solver fold in contact impulses, then integrate
+            // position from the corrected velocity.
             if (body.Count > 0 && body.joint[0].kind == JointKind.Floating)
             {
                 body.rootVelocity = body.rootVelocity + scratch.rootAccel * dt;
+
+                // Skeleton hook: contact-impulse application lives here.
+                // Step 4 of the Phase B plan fills this in with the PGS
+                // normal-constraint loop + Baumgarte; Step 5 adds friction.
+                if (contacts != null && contacts.Count > 0)
+                    ApplyContactImpulses(contacts, dt);
 
                 float3 omega = body.rootVelocity.angular;
                 float3 v = body.rootVelocity.linear;
@@ -78,6 +100,15 @@ namespace Longeron.Physics
                 var increment = new SpatialTransform(qInc, tInc);
                 body.rootPose = increment * body.rootPose;
             }
+        }
+
+        // PGS contact impulse application. Currently a skeleton — the
+        // iteration loop lands in Phase B step 4. Leaving the hook in place
+        // keeps the integrate-after-impulse ordering correct even when the
+        // body is still empty.
+        void ApplyContactImpulses(IList<ContactConstraint> contacts, float dt)
+        {
+            // Intentional no-op until PGS lands. Contacts are discarded.
         }
 
         // Spatial acceleration of body b in body b's frame, from the most

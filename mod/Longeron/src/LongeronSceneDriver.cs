@@ -78,13 +78,13 @@ namespace Longeron
                 // Krakensbane velocity-drain: if FrameVelocity changed this
                 // tick, drain the same delta from rootVelocity.
                 scene.ApplyKrakensbaneStep(dt);
-                // Query PhysX for overlaps + penetrations on every managed
-                // part, then drain the resulting contact set into fExt. Runs
-                // inside this tick (not between Unity physics updates) because
-                // it's a synchronous query — no event races to worry about.
+                // Analytic narrowphase against StaticWorld AABBs — produces
+                // up to 4-point capsule-vs-box manifolds per body. Fed to
+                // the constraint solver's PGS loop (ApplyContactImpulses
+                // inside StepWithContacts). Until PGS lands, contacts are
+                // buffered but unused and the vessel falls through.
                 ContactDiscovery.Discover(scene);
-                ContactSolver.Apply(scene, dt);
-                scene.Scene.Step(dt);
+                scene.Scene.StepWithContacts(scene.Contacts, dt);
                 WriteTransformsBack(scene);
                 Trace(scene);
             }
