@@ -17,10 +17,18 @@ namespace Longeron.Integration
 {
     internal static class InertiaEstimator
     {
+        // KSP uses tonnes internally (Part.mass, Part.rb.mass, GetResourceMass all
+        // report tonnes, and KSP's own stock AddForce calls supply kilonewtons so
+        // F/m comes out in m/s²). Our solver is written in SI (N and kg). Convert
+        // on the boundary — leaving this as t while feeding N-scale forces into
+        // fExt produced a 1000× acceleration bug that turned contact into
+        // relativistic expulsion.
+        const float TONNE_TO_KG = 1000f;
+
         public static Physics.SpatialInertia Estimate(Part part)
         {
-            float mass = part.mass + part.GetResourceMass();
-            if (mass < 1e-6f) mass = 0.01f;
+            float mass = (part.mass + part.GetResourceMass()) * TONNE_TO_KG;
+            if (mass < 1e-3f) mass = 10f;
 
             float radius = EstimateBoundingRadius(part);
             float i = 0.4f * mass * radius * radius;   // solid sphere

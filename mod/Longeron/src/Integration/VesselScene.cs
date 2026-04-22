@@ -30,6 +30,17 @@ namespace Longeron.Integration
         // translating frame.
         public float3 LastFrameVelocity;
 
+        // Per-tick contact buffer. LongeronScenePreTick clears this at the
+        // start of each FixedUpdate; ContactDiscovery.Discover fills it from
+        // query-based physics probes; the late driver drains it into fExt via
+        // ContactSolver.Apply before Scene.Step.
+        public readonly List<ContactEntry> Contacts = new List<ContactEntry>(64);
+
+        // Set of this vessel's own colliders. ContactDiscovery uses it to
+        // filter intra-vessel hits out of the OverlapSphere results (OverlapSphere
+        // doesn't honor Physics.IgnoreCollision pairs — it's a broadphase query).
+        public readonly HashSet<Collider> OwnColliders = new HashSet<Collider>();
+
         private VesselScene(Vessel vessel, ArticulatedScene scene, Part[] bodyToPart, Dictionary<Part, BodyId> partToBody)
         {
             Vessel = vessel;
@@ -38,6 +49,20 @@ namespace Longeron.Integration
             PartToBody = partToBody;
             RootVelocitySeeded = false;
             LastFrameVelocity = float3.zero;
+        }
+
+        public void ClearContacts() => Contacts.Clear();
+
+        public void AddContact(Part part, ContactPoint cp)
+        {
+            if (!PartToBody.TryGetValue(part, out var bodyId)) return;
+            Contacts.Add(new ContactEntry
+            {
+                bodyId = bodyId,
+                point = new float3(cp.point.x, cp.point.y, cp.point.z),
+                normal = new float3(cp.normal.x, cp.normal.y, cp.normal.z),
+                separation = cp.separation,
+            });
         }
 
         // Krakensbane bridge. Call once per FixedUpdate *before* Scene.Step.
@@ -195,7 +220,18 @@ namespace Longeron.Integration
             }
 
             scene.Validate();
-            return new VesselScene(vessel, scene, bodyToPart, partToBody);
+            var vs = new VesselScene(vessel, scene, bodyToPart, partToBody);
+
+            // Collect every collider hanging off any managed part (including
+            // sub-colliders on child transforms — ladders, attach nodes, etc.).
+            // ContactDiscovery filters overlap hits against this set to skip
+            // self-contacts.
+            foreach (var p in ordered)
+            {
+                foreach (var col in p.GetComponentsInChildren<Collider>(includeInactive: true))
+                    vs.OwnColliders.Add(col);
+            }
+            return vs;
         }
 
         // Orphaned parts (no vessel relationship) are skipped. The returned

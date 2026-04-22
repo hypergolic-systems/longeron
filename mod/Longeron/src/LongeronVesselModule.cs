@@ -41,12 +41,10 @@ namespace Longeron
                 if (rb == null) continue;
                 rb.useGravity = false;
                 rb.isKinematic = true;
-                // Kinematic bodies don't collide with static colliders by
-                // default. ContinuousSpeculative (Unity 2018.3+) enables
-                // kinematic-vs-static contact events, which we'll consume
-                // as spatial impulses via OnCollisionStay once a contact
-                // solver lands. For now it's enough to stop the vessel
-                // falling through the launchpad.
+                // Contact detection is query-based (see ContactDiscovery), not
+                // event-based, so we don't need ContinuousSpeculative's swept
+                // contact generation — Discrete is fine and avoids any
+                // interaction with our MovePosition writeback.
                 rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
             }
 
@@ -65,6 +63,12 @@ namespace Longeron
                     pj.joints[i] = null;
                 }
             }
+
+            // Intra-vessel self-contact filtering is handled inside
+            // ContactDiscovery via VesselScene.OwnColliders — no
+            // Physics.IgnoreCollision pass needed (overlap queries don't honor
+            // it anyway). No per-part MonoBehaviour relay either; discovery
+            // is query-based.
 
             Debug.Log(LogPrefix + $"managing vessel '{vessel.vesselName}' with {_scene.BodyToPart.Length} bodies");
         }

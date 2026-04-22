@@ -26,12 +26,22 @@ namespace Longeron
             foreach (var scene in SceneRegistry.Instance.AllScenes)
             {
                 scene.ResetExternalWrenches();
-                // Isolating the Krakensbane test: gravity stays zero until
-                // the contact solver lands. With gravity on we'd fall
-                // through the launchpad before reaching Krakensbane's
-                // activation threshold. Flipping this is a one-liner once
-                // contacts work.
-                scene.Scene.SetGravity(float3.zero);
+                scene.ClearContacts();
+                // vessel.precalc.integrationAccel is the total pseudo-accel KSP
+                // would apply to rb (gravity + rotating-frame corrections). It's
+                // populated by FlightIntegrator's own FixedUpdate (exec order 0);
+                // we run at -10000, so on tick 0 this may be stale/zero. After
+                // that one tick of lag, steady state reads the fresh value each
+                // tick. Acceptable for a spike.
+                if (scene.Vessel != null && scene.Vessel.precalc != null)
+                {
+                    var a = scene.Vessel.precalc.integrationAccel;
+                    scene.Scene.SetGravity(new float3((float)a.x, (float)a.y, (float)a.z));
+                }
+                else
+                {
+                    scene.Scene.SetGravity(float3.zero);
+                }
             }
         }
     }
@@ -64,9 +74,16 @@ namespace Longeron
                 // start of each tick and let our solver contribute only
                 // velocity/acceleration dynamics from there.
                 scene.SyncRootPoseFromRigidbody();
+
                 // Krakensbane velocity-drain: if FrameVelocity changed this
                 // tick, drain the same delta from rootVelocity.
                 scene.ApplyKrakensbaneStep(dt);
+                // Query PhysX for overlaps + penetrations on every managed
+                // part, then drain the resulting contact set into fExt. Runs
+                // inside this tick (not between Unity physics updates) because
+                // it's a synchronous query — no event races to worry about.
+                ContactDiscovery.Discover(scene);
+                ContactSolver.Apply(scene, dt);
                 scene.Scene.Step(dt);
                 WriteTransformsBack(scene);
                 Trace(scene);
@@ -116,7 +133,7 @@ namespace Longeron
             Debug.Log(string.Format(
                 "[Longeron/trace] t={0} v={1} rb_pos=({2:F1},{3:F1},{4:F1}) rb_vel=({5:F2},{6:F2},{7:F2}) " +
                 "fv=({8:F1},{9:F1},{10:F1}) alt={11:F0} " +
-                "srf_v={12:F2} vel_d={13:F2} fext={14:F1} {15}",
+                "srf_v={12:F2} vel_d={13:F2} fext={14:F1} contacts={15} {16}",
                 _tick, vessel.vesselName,
                 rb != null ? rb.position.x : 0f, rb != null ? rb.position.y : 0f, rb != null ? rb.position.z : 0f,
                 rb != null ? rb.velocity.x : 0f, rb != null ? rb.velocity.y : 0f, rb != null ? rb.velocity.z : 0f,
@@ -125,6 +142,7 @@ namespace Longeron
                 vessel.srf_velocity.magnitude,
                 vessel.velocityD.magnitude,
                 fExtMag,
+                scene.Contacts.Count,
                 sb.ToString()));
         }
 
@@ -141,9 +159,9 @@ namespace Longeron
                 if (rb == null) continue;
                 if (!rb.isKinematic) rb.isKinematic = true;
                 if (rb.useGravity) rb.useGravity = false;
-                // Discrete (the kinematic default): no speculative push-out
-                // that fights our writeback. We don't need collision events
-                // until the contact solver lands.
+                // Query-based contact discovery doesn't need speculative sweep
+                // generation; Discrete avoids any interaction with our
+                // MovePosition / velocity writeback.
                 if (rb.collisionDetectionMode != CollisionDetectionMode.Discrete)
                     rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
             }
