@@ -44,11 +44,26 @@ Existing mitigations work by avoiding the regime, not by improving it:
   margins because the inner solver gets faster or stabler, but the
   formulation is the same.
 
-Longeron changes the *formulation*. A rigid stack is, mathematically, zero
-degrees of freedom. In a reduced-coordinate articulated-body formulation,
-that zero-DOF subtree integrates exactly, in closed form, in O(n) time —
-because there is nothing to integrate. The wobble doesn't get suppressed;
-it never enters the simulation in the first place.
+Note that compliance is not the bug. Squad could have used Unity's
+`FixedJoint` everywhere and avoided wobble outright; they didn't,
+because they wanted real structural flex — the small amount of give
+that lets a tall stack survive a hard burn rather than shattering when
+any internal stress overshoots a hard limit. That's the right design
+choice. The bug is that PhysX's PGS, applied to a long chain of
+compliant constraints in maximal coordinates, diverges into wobble
+instead of converging into flex.
+
+Longeron changes the *formulation*, not the model of the joint.
+Featherstone's Articulated-Body Algorithm runs the spanning tree once
+per tick in O(n) leaf-to-root then root-to-leaf, computing joint
+accelerations from the current state and applied wrenches without any
+constraint-residual loop. Joint compliance enters as a local
+spring-damper term in joint space — applied at each joint
+individually — rather than as a constraint to be projected globally.
+The neighbour-residual coupling that breaks PGS on long chains with
+high mass ratios doesn't arise: there are no constraint residuals to
+converge. We keep the compliance Squad wanted; we lose the wobble that
+their solver was producing.
 
 ## Approach
 
@@ -57,10 +72,18 @@ reduced coordinates:
 
 * One spanning tree per vessel, rooted at `vessel.rootPart`. Every other
   part is a child connected by a typed joint:
-  * **Fixed** (zero DOF) — most stack and surface attachments. The
-    interesting case: this is where the wobble was.
-  * **Revolute / Prismatic** (one DOF) — Breaking Ground hinges and pistons.
-  * **Free6** (six DOF) — pre-lock docking ports, until they latch.
+  * **Compliant 6-DOF** — most stack and surface attachments. Six joint
+    DOFs (three translational, three rotational) with stiff
+    spring-damper drives toward the at-attachment relative pose, mass-
+    and geometry-derived stiffness. The wobble target. This is what
+    stock would call a stiff `ConfigurableJoint`; the difference is
+    in how the integrator handles it, not how the joint is modelled.
+  * **Revolute / Prismatic** (one DOF) — Breaking Ground hinges and
+    pistons. The DOF is the real, intended motion.
+  * **Free 6-DOF** (no drive) — pre-lock docking ports, until they latch.
+  * **Fixed** (zero DOF) — narrow edge case for tiny surface-mounted
+    parts (radial decouplers, science instruments) where the joint is
+    effectively a weld and the spring would just be numerical noise.
 * **Forward dynamics** via Featherstone's [**ABA**](https://en.wikipedia.org/wiki/Featherstone%27s_algorithm) —
   one O(n) recursive pass per tick, computing joint accelerations from
   the current state and applied wrenches.
