@@ -26,7 +26,13 @@ namespace Longeron
             foreach (var scene in SceneRegistry.Instance.AllScenes)
             {
                 scene.ResetExternalWrenches();
-                scene.ClearContacts();
+                // NOTE: don't clear scene.Contacts here. Unity's FixedUpdate
+                // pipeline runs ALL FixedUpdates first, *then* the physics
+                // step, *then* OnCollision* callbacks. So the contacts that
+                // PartCollisionRelay populates land *after* both this preTick
+                // and the +10000 driver. Clearing here would wipe the buffer
+                // right before the driver tries to drain it. The driver does
+                // the clear after consuming the buffer.
                 // vessel.precalc.integrationAccel is the total pseudo-accel KSP
                 // would apply to rb (gravity + rotating-frame corrections). It's
                 // populated by FlightIntegrator's own FixedUpdate (exec order 0);
@@ -78,15 +84,17 @@ namespace Longeron
                 // Krakensbane velocity-drain: if FrameVelocity changed this
                 // tick, drain the same delta from rootVelocity.
                 scene.ApplyKrakensbaneStep(dt);
-                // Analytic narrowphase against StaticWorld AABBs — produces
-                // up to 4-point capsule-vs-box manifolds per body. Fed to
-                // the constraint solver's PGS loop (ApplyContactImpulses
-                // inside StepWithContacts). Until PGS lands, contacts are
-                // buffered but unused and the vessel falls through.
-                ContactDiscovery.Discover(scene);
+                // Contact buffer was populated during the *previous* tick's
+                // Unity physics step by PartCollisionRelay's Harmony postfix
+                // on Part.OnCollisionStay/Enter — PhysX-native event-based
+                // discovery, with one tick of lag because Unity dispatches
+                // OnCollision* after all FixedUpdates have already run. Feed
+                // it to the PGS contact loop, then clear so this tick's
+                // physics step can repopulate it for next time.
                 scene.Scene.StepWithContacts(scene.Contacts, dt);
                 WriteTransformsBack(scene);
                 Trace(scene);
+                scene.ClearContacts();
             }
 
             // Reap dead vessels — their VesselModule.OnGoOnRails won't fire
@@ -148,20 +156,38 @@ namespace Longeron
 
         // VesselModule.OnGoOffRails can fire before part rigidbodies are
         // fully instantiated, so our one-shot takeover in the module may
-        // silently skip parts. Idempotently reapply kinematic+CCD every
-        // tick — cheap, and bulletproofs against timing races with
-        // stock physics setup.
+        // silently skip parts. Idempotently reapply rb config every tick —
+        // cheap, and bulletproofs against timing races with stock physics
+        // setup.
+        //
+        // We *don't* want kinematic, because Unity's collision matrix
+        // omits OnCollision* events for kinematic-vs-static pairs at any
+        // CollisionDetectionMode — the events only fire when at least one
+        // side has a non-kinematic Rigidbody. Without those events
+        // PartCollisionRelay's Harmony postfix never fires, and Longeron
+        // sees zero contacts.
+        //
+        // Instead: keep rb non-kinematic but freeze all 6 DOFs and disable
+        // gravity. PhysX will:
+        //   - run the broadphase + narrowphase against static colliders
+        //     and fire OnCollisionStay/Enter on Part (good — that's what
+        //     PartCollisionRelay listens for)
+        //   - try to apply contact impulses to the rb, but the FreezeAll
+        //     constraint zeroes them out at the integrator (good — Longeron
+        //     owns the dynamics; PhysX should not be moving these bodies)
+        //   - the driver writes solver poses each tick by toggling
+        //     constraints off, assigning rb.position/rotation, then back
+        //     on (see WriteTransformsBack for why).
         static void EnsureKinematic(VesselScene scene)
         {
             for (int i = 0; i < scene.BodyToPart.Length; i++)
             {
                 var rb = scene.BodyToPart[i].rb;
                 if (rb == null) continue;
-                if (!rb.isKinematic) rb.isKinematic = true;
+                if (rb.isKinematic) rb.isKinematic = false;
                 if (rb.useGravity) rb.useGravity = false;
-                // Query-based contact discovery doesn't need speculative sweep
-                // generation; Discrete avoids any interaction with our
-                // MovePosition / velocity writeback.
+                if (rb.constraints != RigidbodyConstraints.FreezeAll)
+                    rb.constraints = RigidbodyConstraints.FreezeAll;
                 if (rb.collisionDetectionMode != CollisionDetectionMode.Discrete)
                     rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
             }
@@ -177,8 +203,17 @@ namespace Longeron
                 var rb = part.rb;
                 if (rb == null) continue;
                 var X = scene.Scene.GetWorldTransform(new BodyId(i));
-                rb.MovePosition(new Vector3(X.translation.x, X.translation.y, X.translation.z));
-                rb.MoveRotation(new Quaternion(X.rotation.x, X.rotation.y, X.rotation.z, X.rotation.w));
+                // FreezeAll on a non-kinematic rb anchors it to the pose PhysX
+                // last saw with the freeze active — and silently reverts any
+                // subsequent rb.position / rb.rotation writes (and MovePosition
+                // / MoveRotation) at the next physics step, even though the
+                // assignments appear to succeed when read back immediately.
+                // Clearing constraints around the write moves the freeze anchor
+                // to the solver-commanded pose each tick.
+                rb.constraints = RigidbodyConstraints.None;
+                rb.position = new Vector3(X.translation.x, X.translation.y, X.translation.z);
+                rb.rotation = new Quaternion(X.rotation.x, X.rotation.y, X.rotation.z, X.rotation.w);
+                rb.constraints = RigidbodyConstraints.FreezeAll;
             }
 
             // Set the root rigidbody's velocity explicitly. KSP computes

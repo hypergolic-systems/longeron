@@ -32,23 +32,15 @@ namespace Longeron.Integration
         public float3 LastFrameVelocity;
 
         // Per-tick contact buffer. LongeronScenePreTick clears this at the
-        // start of each FixedUpdate; ContactDiscovery.Discover fills it each
-        // tick by running the analytic narrowphase against StaticWorld; the
-        // driver drains it into the ConstraintSolver before integrating.
+        // start of each FixedUpdate; PartCollisionRelay's Harmony postfix on
+        // Part.OnCollisionStay/Enter populates it from PhysX contact events;
+        // the driver drains it into the ConstraintSolver before integrating.
         public readonly List<ContactConstraint> Contacts = new List<ContactConstraint>(64);
 
-        // Per-body capsule approximations in body-local coords. Populated at
-        // Build via PartShapeEstimator; ContactDiscovery transforms them to
-        // world each tick via ArticulatedScene.GetWorldTransform.
-        public CapsuleShape[] Shapes { get; private set; }
-
-        // Static-world AABB registry (launchpad + future buildings/terrain).
-        // Immutable after scene build.
-        public StaticWorld StaticWorld { get; private set; }
-
-        // Set of this vessel's own colliders. Held for cross-vessel contact
-        // filtering once we add that; not currently consulted by the new
-        // narrowphase-based discovery path.
+        // Set of this vessel's own colliders. Used by PartCollisionRelay to
+        // filter intra-vessel pairs out of the contact buffer (collisions
+        // between two managed parts are not constraints we want PhysX to
+        // tell us about — Longeron owns inter-part dynamics directly).
         public readonly HashSet<Collider> OwnColliders = new HashSet<Collider>();
 
         private VesselScene(Vessel vessel, ArticulatedScene scene, Part[] bodyToPart, Dictionary<Part, BodyId> partToBody)
@@ -63,11 +55,17 @@ namespace Longeron.Integration
 
         public void ClearContacts() => Contacts.Clear();
 
+        // PhysX-driven contact ingest. Called from PartCollisionRelay's
+        // Harmony postfix on Part.OnCollisionStay / OnCollisionEnter for
+        // each ContactPoint that survived the intra-vessel filter. The
+        // sign convention here matches Unity: ContactPoint.separation is
+        // negative when the colliders are interpenetrating, so depth is
+        // -separation (positive = penetrating). The normal points from
+        // `otherCollider` toward the receiving Part — i.e., from the
+        // static world toward our body — which is the convention the
+        // PGS solver expects.
         public void AddContact(Part part, ContactPoint cp)
         {
-            // Kept for a potential PhysX-event-based discovery path later.
-            // Current narrowphase-based discovery doesn't use this; populate
-            // directly via scene.Contacts.Add instead.
             if (!PartToBody.TryGetValue(part, out var bodyId)) return;
             Contacts.Add(new ContactConstraint
             {
@@ -235,17 +233,10 @@ namespace Longeron.Integration
             scene.Validate();
             var vs = new VesselScene(vessel, scene, bodyToPart, partToBody);
 
-            // Capsule primitives per body (body-frame coords).
-            var shapes = new CapsuleShape[ordered.Count];
-            for (int i = 0; i < ordered.Count; i++)
-                shapes[i] = PartShapeEstimator.Estimate(ordered[i]);
-            vs.Shapes = shapes;
-
-            // Launchpad → AABB list. Queried once at scene build.
-            vs.StaticWorld = StaticWorld.BuildForLaunchpad();
-
-            // Retained for future cross-vessel filtering; current narrowphase
-            // path doesn't consult it (no capsule-vs-capsule discovery yet).
+            // Build the OwnColliders set for intra-vessel contact filtering
+            // in PartCollisionRelay. PhysX raises OnCollisionStay events for
+            // any pair of colliding rigidbodies — we're only interested in
+            // contacts against geometry outside our own vessel.
             foreach (var p in ordered)
             {
                 foreach (var col in p.GetComponentsInChildren<Collider>(includeInactive: true))

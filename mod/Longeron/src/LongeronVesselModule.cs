@@ -40,11 +40,13 @@ namespace Longeron
                 var rb = p.rb;
                 if (rb == null) continue;
                 rb.useGravity = false;
-                rb.isKinematic = true;
-                // Contact detection is query-based (see ContactDiscovery), not
-                // event-based, so we don't need ContinuousSpeculative's swept
-                // contact generation — Discrete is fine and avoids any
-                // interaction with our MovePosition writeback.
+                // Non-kinematic + FreezeAll: see LongeronSceneDriver.EnsureKinematic
+                // for the full rationale. In short, kinematic-vs-static doesn't
+                // generate OnCollision events, so we need the rb non-kinematic
+                // and use FreezeAll (toggled per tick during writeback) to keep
+                // PhysX from physically moving it.
+                rb.isKinematic = false;
+                rb.constraints = RigidbodyConstraints.FreezeAll;
                 rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
             }
 
@@ -64,11 +66,11 @@ namespace Longeron
                 }
             }
 
-            // Intra-vessel self-contact filtering is handled inside
-            // ContactDiscovery via VesselScene.OwnColliders — no
-            // Physics.IgnoreCollision pass needed (overlap queries don't honor
-            // it anyway). No per-part MonoBehaviour relay either; discovery
-            // is query-based.
+            // Intra-vessel self-contact filtering happens in
+            // PartCollisionRelay via VesselScene.OwnColliders — no
+            // Physics.IgnoreCollision pass needed. No per-part
+            // MonoBehaviour relay either; we hook stock Part's existing
+            // OnCollisionStay/Enter via Harmony postfixes.
 
             Debug.Log(LogPrefix + $"managing vessel '{vessel.vesselName}' with {_scene.BodyToPart.Length} bodies");
         }
