@@ -14,3 +14,7 @@ release/
 
 # Logs
 *.log
+
+# Local KSP install used for iterative testing — see CLAUDE.md "Build & install"
+# (just install ./game). Save data lives here too; keep it out of version control.
+game/
