@@ -113,9 +113,9 @@ even though its solver is fine:
   *ACM Transactions on Graphics*, 26 (2). Why PGS converges slowly on
   long chains and what you can do about it without changing formulation.
 * Mirtich, Brian (1996). *[Impulse-based Dynamic Simulation of Rigid Body
-  Systems](https://www.cs.cmu.edu/~baraff/sigcourse/notesg.pdf)* (Ph.D.
-  thesis, UC Berkeley). The other way to dodge the convergence problem,
-  which KSP didn't take.
+  Systems](https://people.eecs.berkeley.edu/~jfc/mirtich/thesis/mirtichThesis.pdf)*
+  (Ph.D. thesis, UC Berkeley). The other way to dodge the convergence
+  problem, which KSP didn't take.
 
 ## License
 
