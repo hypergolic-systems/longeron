@@ -61,6 +61,14 @@ enum class ShapeKind : uint8_t {
 // truncation warnings rather than silently massive payloads.
 inline constexpr uint32_t kMaxConvexHullVertices = 256;
 
+// Constraint kinds carried in ConstraintCreate records.
+//   Fixed   — JPH::FixedConstraint with mAutoDetectPoint=true. Rigidly
+//             freezes the relative pose of two bodies. Phase 2.2.
+//   SixDOF  — Phase 2.x compliant joint (per-axis spring/damper). Future.
+enum class ConstraintKind : uint8_t {
+    Fixed = 0,
+};
+
 // Object layer assignments (Phase 1). Phase 2 will extend with
 // per-vessel layers for self-collision filtering.
 enum class Layer : uint8_t {

@@ -13,6 +13,7 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Constraints/Constraint.h>
 
 #include "bridge.h"  // LongeronConfig
 #include "layers.h"
@@ -61,6 +62,8 @@ private:
     void HandleSetGravity(const uint8_t*& cur, const uint8_t* end);
     void HandleSetKinematicPose(const uint8_t*& cur, const uint8_t* end);
     void HandleForceDelta(const uint8_t*& cur, const uint8_t* end);
+    void HandleConstraintCreate(const uint8_t*& cur, const uint8_t* end);
+    void HandleConstraintDestroy(const uint8_t*& cur, const uint8_t* end);
 
     // -- Output emission ----------------------------------------------
     void EmitBodyPoses();
@@ -91,6 +94,11 @@ private:
     // user_id (uint64) so reverse lookup uses Body::GetUserData() and
     // doesn't require this map.
     std::unordered_map<uint32_t, JPH::BodyID> mBodyRegistry;
+
+    // Constraint registry: caller-assigned constraint_id → Jolt
+    // Constraint ref. Phase 2.2 only adds FixedConstraint; future
+    // kinds extend the same map.
+    std::unordered_map<uint32_t, JPH::Ref<JPH::Constraint>> mConstraintRegistry;
 
     // Per-tick output buffer cursor (only valid during Step).
     uint8_t* mOutputBuffer = nullptr;

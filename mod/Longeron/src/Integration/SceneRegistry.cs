@@ -37,6 +37,11 @@ namespace Longeron.Integration
         public const uint SyntheticGroundBodyId = 1;
         static uint _nextBodyId = 2;
 
+        // Constraint IDs are minted from a separate counter so the
+        // namespaces don't collide. The native side keys constraints
+        // independently of bodies.
+        static uint _nextConstraintId = 1;
+
         public static IEnumerable<ManagedVessel> Vessels => _vessels.Values;
 
         public static int Count => _vessels.Count;
@@ -44,6 +49,11 @@ namespace Longeron.Integration
         public static BodyHandle MintBodyHandle()
         {
             return new BodyHandle(_nextBodyId++);
+        }
+
+        public static uint MintConstraintId()
+        {
+            return _nextConstraintId++;
         }
 
         public static ManagedVessel Register(Vessel vessel)

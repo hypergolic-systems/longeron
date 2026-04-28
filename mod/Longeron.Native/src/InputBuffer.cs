@@ -72,6 +72,15 @@ namespace Longeron.Native
     }
 
     /// <summary>
+    /// Mirrors <c>longeron::ConstraintKind</c>. Phase 2.2 supports
+    /// Fixed (rigid weld); compliant SixDOF lands later.
+    /// </summary>
+    public enum ConstraintKind : byte
+    {
+        Fixed = 0,
+    }
+
+    /// <summary>
     /// Append-only writer for the input record stream. The buffer is
     /// allocated once via <see cref="Marshal.AllocHGlobal"/> and reused
     /// every tick — <see cref="Reset"/> clears the length without
@@ -356,6 +365,33 @@ namespace Longeron.Native
             byte* p = _ptr + _len;
             *p++ = (byte)RecordType.BodyDestroy;
             *(uint*)p = body.Id;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Create a rigid (FixedConstraint) joint between two bodies.
+        /// Layout: tag(1) + constraint_id(4) + kind(1) + body_a(4) + body_b(4) = 14.
+        /// </summary>
+        public void WriteConstraintCreateFixed(uint constraintId, BodyHandle bodyA, BodyHandle bodyB)
+        {
+            const int kSize = 14;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.ConstraintCreate;
+            *(uint*)p = constraintId;       p += 4;
+            *p++ = (byte)ConstraintKind.Fixed;
+            *(uint*)p = bodyA.Id;           p += 4;
+            *(uint*)p = bodyB.Id;           p += 4;
+            _len += kSize;
+        }
+
+        public void WriteConstraintDestroy(uint constraintId)
+        {
+            const int kSize = 5;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.ConstraintDestroy;
+            *(uint*)p = constraintId;
             _len += kSize;
         }
 

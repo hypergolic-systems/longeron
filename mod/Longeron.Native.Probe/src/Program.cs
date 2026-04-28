@@ -32,6 +32,7 @@ namespace Longeron.Native.Probe
             Run("convex hull mirrored + contact fires",        ConvexHull_FiresContactReport);
             Run("static compound (box+sphere) fires contact",  CompoundShape_FiresContactReport);
             Run("contact normal points roughly upward",        ContactNormal_PointsUpward);
+            Run("FixedConstraint holds two dynamic bodies together", FixedConstraint_HoldsTwoBodies);
 
             Console.WriteLine();
             if (sFailures == 0)
@@ -410,6 +411,88 @@ namespace Longeron.Native.Probe
                 AssertTrue(found, "no ContactReport emitted at all");
                 AssertTrue(observedY > 0.5f,
                     $"contact normal Y={observedY:F3} — expected close to 1 for a body sitting on a flat ground");
+            }
+        }
+
+        private static void FixedConstraint_HoldsTwoBodies()
+        {
+            // Two dynamic boxes 1 m apart along X, joined by a
+            // FixedConstraint. Gravity along -Y. Static ground 1 m
+            // below the lower box. After settling, both bodies should
+            // have the same Y (constraint keeps them at the original
+            // relative offset). Without the constraint, one box would
+            // fall onto the ground and the other would fall forever
+            // since they're independent dynamic bodies.
+            using (var world = new World(LongeronConfig.Default))
+            {
+                world.Input.WriteSetGravity(0, -9.81, 0);
+
+                var ground = new BodyHandle(1);
+                var a      = new BodyHandle(2);
+                var b      = new BodyHandle(3);
+
+                world.Input.WriteBodyCreateBox(
+                    ground, BodyType.Static, Layer.Static,
+                    halfX: 50f, halfY: 0.5f, halfZ: 50f,
+                    posX: 0, posY: -1.5, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 0f);
+
+                // Two boxes side-by-side at y=2.
+                world.Input.WriteBodyCreateBox(
+                    a, BodyType.Dynamic, Layer.Kinematic,
+                    halfX: 0.5f, halfY: 0.5f, halfZ: 0.5f,
+                    posX: -1.0, posY: 2.0, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 1f);
+                world.Input.WriteBodyCreateBox(
+                    b, BodyType.Dynamic, Layer.Kinematic,
+                    halfX: 0.5f, halfY: 0.5f, halfZ: 0.5f,
+                    posX: +1.0, posY: 2.0, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 1f);
+                world.Input.WriteConstraintCreateFixed(
+                    constraintId: 100, bodyA: a, bodyB: b);
+
+                // Step for ~3 s — long enough to settle.
+                BodyPoseRecord poseA = default, poseB = default;
+                bool sawA = false, sawB = false;
+                for (int i = 0; i < 180; ++i)
+                {
+                    world.Step(1f / 60f);
+                    sawA = false; sawB = false;
+                    RecordType type;
+                    while ((type = world.Output.Next()) != RecordType.None)
+                    {
+                        if (type == RecordType.BodyPose)
+                        {
+                            world.Output.ReadBodyPose(out var p);
+                            if (p.Body.Id == 2) { poseA = p; sawA = true; }
+                            else if (p.Body.Id == 3) { poseB = p; sawB = true; }
+                        }
+                        else if (type == RecordType.ContactReport)
+                        {
+                            world.Output.ReadContactReport(out _);
+                        }
+                    }
+                }
+
+                AssertTrue(sawA && sawB, "missing pose record for A or B");
+                // After settling on the ground, both bodies' Y must
+                // match within tolerance. If the constraint is broken,
+                // they diverge.
+                double dy = System.Math.Abs(poseA.PosY - poseB.PosY);
+                AssertTrue(dy < 0.05,
+                    $"FixedConstraint broken — bodies diverged in Y: A.y={poseA.PosY:F3}, B.y={poseB.PosY:F3}, |Δy|={dy:F3}");
+                // Distance between A and B should be approximately
+                // their original 2 m offset (X axis). FixedConstraint
+                // preserves the relative pose at the moment it was
+                // created.
+                double dx = poseA.PosX - poseB.PosX;
+                double dz = poseA.PosZ - poseB.PosZ;
+                double dist = System.Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                AssertTrue(dist > 1.5 && dist < 2.5,
+                    $"FixedConstraint distance drifted: |A-B|={dist:F3} (expected ≈2.0)");
             }
         }
 

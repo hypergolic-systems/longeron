@@ -64,7 +64,25 @@ namespace Longeron
             // after OnGoOffRails).
             ApplyKinematicTakeover(vessel);
 
-            Debug.Log(LogPrefix + $"managing '{vessel.vesselName}': {created} body create(s) queued, {skipped} skipped");
+            // Phase 2.2: Fixed constraints between every parent-child
+            // pair. Walks the same parts list — bodies were registered
+            // in vessel.parts iteration order so any part's parent has
+            // already been registered (KSP guarantees parent is
+            // earlier in vessel.parts than its children).
+            int constraintsCreated = 0;
+            foreach (var part in vessel.parts)
+            {
+                if (part?.parent == null) continue;
+                if (!managed.TryGetHandle(part, out var childHandle)) continue;
+                if (!managed.TryGetHandle(part.parent, out var parentHandle)) continue;
+
+                uint cid = SceneRegistry.MintConstraintId();
+                input.WriteConstraintCreateFixed(cid, parentHandle, childHandle);
+                managed.AddConstraint(cid);
+                constraintsCreated++;
+            }
+
+            Debug.Log(LogPrefix + $"managing '{vessel.vesselName}': {created} body create(s), {constraintsCreated} fixed-constraint(s) queued, {skipped} skipped");
         }
 
         public override void OnGoOnRails()
@@ -75,6 +93,11 @@ namespace Longeron
             var world = LongeronAddon.ActiveWorld;
             if (world != null)
             {
+                // Constraints first (they reference bodies), then
+                // bodies. Order matches the destructor in
+                // LongeronWorld.
+                foreach (var cid in managed.ConstraintIds)
+                    world.Input.WriteConstraintDestroy(cid);
                 foreach (var h in managed.BodyHandles)
                     world.Input.WriteBodyDestroy(h);
             }

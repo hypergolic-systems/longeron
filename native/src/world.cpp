@@ -10,6 +10,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -159,6 +160,14 @@ LongeronWorld::LongeronWorld(const ::LongeronConfig& cfg)
 }
 
 LongeronWorld::~LongeronWorld() {
+    // Remove constraints first (they reference bodies).
+    for (auto& kv : mConstraintRegistry) {
+        if (kv.second != nullptr) {
+            mPhysicsSystem.RemoveConstraint(kv.second);
+        }
+    }
+    mConstraintRegistry.clear();
+
     // Remove + destroy all bodies still registered.
     if (!mBodyRegistry.empty()) {
         JPH::BodyInterface& bi = mPhysicsSystem.GetBodyInterface();
@@ -403,6 +412,73 @@ void LongeronWorld::HandleSetKinematicPose(const uint8_t*& cur, const uint8_t* e
     bi.SetLinearAndAngularVelocity(it->second, lin_v, ang_v);
 }
 
+void LongeronWorld::HandleConstraintCreate(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t constraint_id = Read<uint32_t>(cur, end);
+    const uint8_t  kind          = Read<uint8_t>(cur, end);
+    const uint32_t body_a_id     = Read<uint32_t>(cur, end);
+    const uint32_t body_b_id     = Read<uint32_t>(cur, end);
+
+    if (mConstraintRegistry.find(constraint_id) != mConstraintRegistry.end()) {
+        JPH::Trace("ConstraintCreate: duplicate id %u, skipping", constraint_id);
+        return;
+    }
+
+    auto it_a = mBodyRegistry.find(body_a_id);
+    auto it_b = mBodyRegistry.find(body_b_id);
+    if (it_a == mBodyRegistry.end() || it_b == mBodyRegistry.end()) {
+        JPH::Trace("ConstraintCreate %u: body lookup failed (a=%u found=%d, b=%u found=%d)",
+                   constraint_id, body_a_id, it_a != mBodyRegistry.end(),
+                   body_b_id, it_b != mBodyRegistry.end());
+        return;
+    }
+
+    // Need direct Body* pointers (not BodyIDs) for constraint
+    // creation. We call this from the input-parse phase, before
+    // PhysicsSystem::Update — no concurrent access — so the
+    // no-lock interface is safe.
+    const JPH::BodyLockInterfaceNoLock& lock = mPhysicsSystem.GetBodyLockInterfaceNoLock();
+    JPH::Body* body_a = lock.TryGetBody(it_a->second);
+    JPH::Body* body_b = lock.TryGetBody(it_b->second);
+    if (body_a == nullptr || body_b == nullptr) {
+        JPH::Trace("ConstraintCreate %u: body fetch returned null", constraint_id);
+        return;
+    }
+
+    JPH::Ref<JPH::Constraint> constraint;
+    switch (static_cast<ConstraintKind>(kind)) {
+    case ConstraintKind::Fixed: {
+        JPH::FixedConstraintSettings settings;
+        // AutoDetectPoint computes a sensible anchor from the two
+        // bodies' current poses — no need for the C# side to compute
+        // exact attachment node positions.
+        settings.mAutoDetectPoint = true;
+        constraint = settings.Create(*body_a, *body_b);
+        break;
+    }
+    default:
+        JPH::Trace("ConstraintCreate %u: unknown kind %u", constraint_id, (unsigned)kind);
+        return;
+    }
+
+    if (constraint == nullptr) {
+        JPH::Trace("ConstraintCreate %u: settings.Create returned null", constraint_id);
+        return;
+    }
+
+    mPhysicsSystem.AddConstraint(constraint);
+    mConstraintRegistry.emplace(constraint_id, constraint);
+}
+
+void LongeronWorld::HandleConstraintDestroy(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t constraint_id = Read<uint32_t>(cur, end);
+    auto it = mConstraintRegistry.find(constraint_id);
+    if (it == mConstraintRegistry.end()) return;
+    if (it->second != nullptr) {
+        mPhysicsSystem.RemoveConstraint(it->second);
+    }
+    mConstraintRegistry.erase(it);
+}
+
 void LongeronWorld::HandleForceDelta(const uint8_t*& cur, const uint8_t* end) {
     const uint32_t user_id = Read<uint32_t>(cur, end);
     const double fx = Read<double>(cur, end);
@@ -486,11 +562,13 @@ int32_t LongeronWorld::Step(
     while (cur < end) {
         const uint8_t tag = *cur++;
         switch (static_cast<RecordType>(tag)) {
-        case RecordType::BodyCreate:       HandleBodyCreate(cur, end); break;
-        case RecordType::BodyDestroy:      HandleBodyDestroy(cur, end); break;
-        case RecordType::SetGravity:       HandleSetGravity(cur, end); break;
-        case RecordType::SetKinematicPose: HandleSetKinematicPose(cur, end); break;
-        case RecordType::ForceDelta:       HandleForceDelta(cur, end); break;
+        case RecordType::BodyCreate:        HandleBodyCreate(cur, end); break;
+        case RecordType::BodyDestroy:       HandleBodyDestroy(cur, end); break;
+        case RecordType::SetGravity:        HandleSetGravity(cur, end); break;
+        case RecordType::SetKinematicPose:  HandleSetKinematicPose(cur, end); break;
+        case RecordType::ForceDelta:        HandleForceDelta(cur, end); break;
+        case RecordType::ConstraintCreate:  HandleConstraintCreate(cur, end); break;
+        case RecordType::ConstraintDestroy: HandleConstraintDestroy(cur, end); break;
         default:
             // Unknown / unsupported in Phase 1 — abort to avoid mis-
             // parsing the remainder of the stream.
