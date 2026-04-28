@@ -7,6 +7,9 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -14,6 +17,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace longeron {
 
@@ -209,25 +213,67 @@ bool LongeronWorld::ReserveOutput(size_t bytes) {
 // --------------------------------------------------------------------
 // Input handlers
 
-void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
-    const uint32_t user_id  = Read<uint32_t>(cur, end);
-    const uint8_t  body_type = Read<uint8_t>(cur, end);
-    const uint8_t  shape_kind = Read<uint8_t>(cur, end);
-
-    if (shape_kind != static_cast<uint8_t>(ShapeKind::Box)) {
-        // Phase 1 only supports Box. Skip.
-        return;
+// Build a single Jolt shape from a sub-shape record on the input
+// stream. Advances `cur`. Returns null Ref on failure (logged via
+// JPH::Trace which routes to the LongeronTrace handler).
+static JPH::RefConst<JPH::Shape> BuildSubShape(const uint8_t*& cur, const uint8_t* end) {
+    const uint8_t kind = Read<uint8_t>(cur, end);
+    switch (static_cast<ShapeKind>(kind)) {
+    case ShapeKind::Box: {
+        const JPH::Vec3 half_extents = ReadFloat3(cur, end);
+        return JPH::RefConst<JPH::Shape>(new JPH::BoxShape(half_extents));
     }
+    case ShapeKind::Sphere: {
+        const float radius = Read<float>(cur, end);
+        return JPH::RefConst<JPH::Shape>(new JPH::SphereShape(radius));
+    }
+    case ShapeKind::ConvexHull: {
+        const uint32_t raw_count = Read<uint32_t>(cur, end);
+        const uint32_t count = raw_count > kMaxConvexHullVertices
+                                  ? kMaxConvexHullVertices
+                                  : raw_count;
+        if (raw_count > kMaxConvexHullVertices) {
+            JPH::Trace("ConvexHull truncated: %u verts capped at %u",
+                       raw_count, kMaxConvexHullVertices);
+        }
+        JPH::Array<JPH::Vec3> verts;
+        verts.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            verts.push_back(ReadFloat3(cur, end));
+        }
+        // Skip any remaining truncated verts so the cursor lines up.
+        for (uint32_t i = count; i < raw_count; ++i) {
+            (void)ReadFloat3(cur, end);
+        }
+        JPH::ConvexHullShapeSettings settings(verts);
+        JPH::Shape::ShapeResult result = settings.Create();
+        if (result.HasError()) {
+            JPH::Trace("ConvexHull create failed: %s", result.GetError().c_str());
+            return JPH::RefConst<JPH::Shape>();
+        }
+        return result.Get();
+    }
+    default:
+        JPH::Trace("Unknown ShapeKind %u in BodyCreate", (unsigned)kind);
+        return JPH::RefConst<JPH::Shape>();
+    }
+}
 
-    // Box shape: float3 half-extents
-    const JPH::Vec3 half_extents = ReadFloat3(cur, end);
-    const JPH::RVec3 pos         = ReadDouble3(cur, end);
-    const JPH::Quat  rot         = ReadFloat4Quat(cur, end);
-    const float      mass        = Read<float>(cur, end);
-    const uint8_t    layer_id    = Read<uint8_t>(cur, end);
+void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t   user_id   = Read<uint32_t>(cur, end);
+    const uint8_t    body_type = Read<uint8_t>(cur, end);
+    const uint8_t    layer_id  = Read<uint8_t>(cur, end);
+    const JPH::RVec3 pos       = ReadDouble3(cur, end);
+    const JPH::Quat  rot       = ReadFloat4Quat(cur, end);
+    const float      mass      = Read<float>(cur, end);
+    const uint8_t    shape_count = Read<uint8_t>(cur, end);
 
     if (mBodyRegistry.find(user_id) != mBodyRegistry.end()) {
-        // Duplicate id; ignore.
+        JPH::Trace("BodyCreate: duplicate user_id %u, skipping", user_id);
+        return;
+    }
+    if (shape_count == 0) {
+        JPH::Trace("BodyCreate: shape_count=0 for user_id %u, skipping", user_id);
         return;
     }
 
@@ -236,7 +282,9 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
     case BodyType::Static:    motion_type = JPH::EMotionType::Static; break;
     case BodyType::Kinematic: motion_type = JPH::EMotionType::Kinematic; break;
     case BodyType::Dynamic:   motion_type = JPH::EMotionType::Dynamic; break;
-    default: return;
+    default:
+        JPH::Trace("BodyCreate: bad body_type %u", (unsigned)body_type);
+        return;
     }
 
     JPH::ObjectLayer obj_layer;
@@ -247,23 +295,59 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
                               ? ObjLayers::STATIC : ObjLayers::KINEMATIC; break;
     }
 
-    JPH::Ref<JPH::BoxShape> shape = new JPH::BoxShape(half_extents);
+    // Read sub-shape records (transform + kind + params per shape).
+    // If shape_count == 1 and the local transform is identity, use the
+    // single shape directly. Otherwise wrap in a StaticCompoundShape.
+    struct SubShape {
+        JPH::Vec3 pos;
+        JPH::Quat rot;
+        JPH::RefConst<JPH::Shape> shape;
+    };
+    std::vector<SubShape> subs;
+    subs.reserve(shape_count);
+    for (uint8_t i = 0; i < shape_count; ++i) {
+        SubShape s;
+        s.pos   = ReadFloat3(cur, end);
+        s.rot   = ReadFloat4Quat(cur, end);
+        s.shape = BuildSubShape(cur, end);
+        if (s.shape == nullptr) {
+            JPH::Trace("BodyCreate: failed to build sub-shape %u for user_id %u",
+                       (unsigned)i, user_id);
+            return;
+        }
+        subs.push_back(std::move(s));
+    }
 
-    JPH::BodyCreationSettings settings(shape, pos, rot, motion_type, obj_layer);
+    JPH::RefConst<JPH::Shape> body_shape;
+    if (subs.size() == 1
+        && subs[0].pos == JPH::Vec3::sZero()
+        && subs[0].rot == JPH::Quat::sIdentity())
+    {
+        body_shape = subs[0].shape;
+    } else {
+        JPH::StaticCompoundShapeSettings compound;
+        for (const auto& s : subs) {
+            compound.AddShape(s.pos, s.rot, s.shape);
+        }
+        JPH::Shape::ShapeResult result = compound.Create();
+        if (result.HasError()) {
+            JPH::Trace("BodyCreate: StaticCompoundShape failed: %s for user_id %u",
+                       result.GetError().c_str(), user_id);
+            return;
+        }
+        body_shape = result.Get();
+    }
+
+    JPH::BodyCreationSettings settings(body_shape, pos, rot, motion_type, obj_layer);
     settings.mUserData = static_cast<uint64_t>(user_id);
 
     // Kinematic-vs-static and kinematic-vs-kinematic contact callbacks
     // are gated behind this flag in Jolt — Body.inl::sFindCollidingPairsCanCollide.
-    // Without it, our entire architecture (kinematic vessel parts vs.
-    // static terrain, kinematic-vs-kinematic for inter-vessel
-    // contacts) silently produces no contacts. Set it on every body
-    // we register; the cost is per-pair filter checks during the
-    // broadphase, which is negligible at our scale.
+    // Without it, our entire architecture silently produces no
+    // contacts. Set it on every body we register.
     settings.mCollideKinematicVsNonDynamic = true;
 
     if (motion_type == JPH::EMotionType::Dynamic) {
-        // Mass override (kg) — for Phase 1 just used to populate
-        // MassProperties; dynamic bodies are Phase 2+.
         settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
         settings.mMassPropertiesOverride.mMass = mass;
     }
@@ -274,7 +358,10 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
         motion_type == JPH::EMotionType::Static
             ? JPH::EActivation::DontActivate
             : JPH::EActivation::Activate);
-    if (id.IsInvalid()) return;
+    if (id.IsInvalid()) {
+        JPH::Trace("BodyCreate: CreateAndAddBody returned invalid id for user_id %u", user_id);
+        return;
+    }
 
     mBodyRegistry.emplace(user_id, id);
     mNeedsBroadphaseOptimize = true;

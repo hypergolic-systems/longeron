@@ -28,6 +28,10 @@ namespace Longeron.Native.Probe
             Run("kinematic vs kinematic fires contact",  KinematicVsKinematic_FiresContactReport);
             Run("non-overlapping bodies fire no contact", KinematicNotOverlapping_NoContactReport);
             Run("persisted contact fires every tick",    KinematicPersistedContact_FiresEveryTick);
+            Run("sphere shape mirrored + contact fires",       SphereShape_FiresContactReport);
+            Run("convex hull mirrored + contact fires",        ConvexHull_FiresContactReport);
+            Run("static compound (box+sphere) fires contact",  CompoundShape_FiresContactReport);
+            Run("contact normal points roughly upward",        ContactNormal_PointsUpward);
 
             Console.WriteLine();
             if (sFailures == 0)
@@ -236,6 +240,176 @@ namespace Longeron.Native.Probe
                 AssertTrue(contactsSeen >= 25,
                     $"expected persistent contact for ~30 ticks, saw {contactsSeen} — " +
                     "OnContactPersisted may not be firing for kinematic-vs-static");
+            }
+        }
+
+        // -- Shape mirroring tests (Phase 1.5) --------------------------
+
+        private static void SphereShape_FiresContactReport()
+        {
+            using (var world = new World(LongeronConfig.Default))
+            {
+                var ground = new BodyHandle(1);
+                var sphere = new BodyHandle(2);
+
+                world.Input.WriteBodyCreateBox(
+                    ground, BodyType.Static, Layer.Static,
+                    halfX: 5f, halfY: 0.5f, halfZ: 5f,
+                    posX: 0, posY: -0.5, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 0f);
+
+                // Sphere of radius 0.5 centered at y=0.4 → bottom at y=-0.1,
+                // overlapping ground top by 0.1.
+                world.Input.WriteBodyCreateSphere(
+                    sphere, BodyType.Kinematic, Layer.Kinematic,
+                    radius: 0.5f,
+                    posX: 0, posY: 0.4, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 1f);
+
+                world.Step(1f / 60f);
+
+                AssertTrue(HasContactBetween(world, 1, 2),
+                    "sphere body did not produce a ContactReport against ground");
+            }
+        }
+
+        private static void ConvexHull_FiresContactReport()
+        {
+            using (var world = new World(LongeronConfig.Default))
+            {
+                var ground = new BodyHandle(1);
+                var hull   = new BodyHandle(2);
+
+                world.Input.WriteBodyCreateBox(
+                    ground, BodyType.Static, Layer.Static,
+                    halfX: 5f, halfY: 0.5f, halfZ: 5f,
+                    posX: 0, posY: -0.5, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 0f);
+
+                // Tetrahedron vertices in body-local frame.
+                // Apex at +y, base triangle below.
+                float[] tetraVerts = {
+                     0f,  1f,  0f,    // apex
+                     1f, -1f,  1f,    // base front-right
+                    -1f, -1f,  1f,    // base front-left
+                     0f, -1f, -1f,    // base back
+                };
+
+                // Place body so the base (y_local=-1) is at world y=-0.1
+                // — overlapping ground top.
+                world.Input.WriteBodyCreateConvexHull(
+                    hull, BodyType.Kinematic, Layer.Kinematic,
+                    vertices: tetraVerts,
+                    posX: 0, posY: 0.9, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 1f);
+
+                world.Step(1f / 60f);
+
+                AssertTrue(HasContactBetween(world, 1, 2),
+                    "convex hull body did not produce a ContactReport against ground");
+            }
+        }
+
+        private static void CompoundShape_FiresContactReport()
+        {
+            // Two sub-shapes within one body: a box on the left, a
+            // sphere on the right, both above the ground but with the
+            // sphere's bottom dipping into ground.
+            using (var world = new World(LongeronConfig.Default))
+            {
+                var ground = new BodyHandle(1);
+                var compound = new BodyHandle(2);
+
+                world.Input.WriteBodyCreateBox(
+                    ground, BodyType.Static, Layer.Static,
+                    halfX: 5f, halfY: 0.5f, halfZ: 5f,
+                    posX: 0, posY: -0.5, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 0f);
+
+                // Body origin at (0, 0.6, 0). Sub-shapes:
+                //   Box (half 0.4) at sub_pos (-1, 0, 0): center (-1, 0.6, 0),
+                //     bottom y=0.2 — clear of ground.
+                //   Sphere (radius 0.7) at sub_pos (+1, 0, 0): center (+1, 0.6, 0),
+                //     bottom y=-0.1 — overlapping ground.
+                world.Input.BeginBodyCreate(
+                    compound, BodyType.Kinematic, Layer.Kinematic,
+                    posX: 0, posY: 0.6, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 1f, shapeCount: 2);
+                world.Input.AppendShapeBox(
+                    -1, 0, 0,  0, 0, 0, 1,
+                    halfX: 0.4f, halfY: 0.4f, halfZ: 0.4f);
+                world.Input.AppendShapeSphere(
+                    +1, 0, 0,  0, 0, 0, 1,
+                    radius: 0.7f);
+
+                world.Step(1f / 60f);
+
+                AssertTrue(HasContactBetween(world, 1, 2),
+                    "compound body (box+sphere) did not produce a ContactReport — " +
+                    "one of the sub-shapes was supposed to overlap the ground");
+            }
+        }
+
+        private static void ContactNormal_PointsUpward()
+        {
+            // Body resting on ground: contact normal should point
+            // approximately +Y (away from the static ground into the
+            // kinematic body). Verifies that we're actually decoding
+            // contact data correctly, not just that contacts fire.
+            using (var world = new World(LongeronConfig.Default))
+            {
+                var ground = new BodyHandle(1);
+                var sphere = new BodyHandle(2);
+
+                world.Input.WriteBodyCreateBox(
+                    ground, BodyType.Static, Layer.Static,
+                    halfX: 5f, halfY: 0.5f, halfZ: 5f,
+                    posX: 0, posY: -0.5, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 0f);
+
+                world.Input.WriteBodyCreateSphere(
+                    sphere, BodyType.Kinematic, Layer.Kinematic,
+                    radius: 0.5f,
+                    posX: 0, posY: 0.4, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    mass: 1f);
+
+                world.Step(1f / 60f);
+
+                bool found = false;
+                float observedY = 0f;
+                RecordType type;
+                while ((type = world.Output.Next()) != RecordType.None)
+                {
+                    if (type == RecordType.ContactReport)
+                    {
+                        world.Output.ReadContactReport(out var c);
+                        // Jolt sorts the body pair by ID, so normal direction
+                        // depends on which is body1 vs body2 in Jolt's terms.
+                        // Take |normal.Y| > 0.5 — pointing roughly along +/-Y
+                        // is what "resting on ground" should look like.
+                        found = true;
+                        observedY = Math.Abs(c.NormalY);
+                    }
+                    else if (type == RecordType.BodyPose)
+                    {
+                        world.Output.ReadBodyPose(out _);
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException($"unexpected record type {type}");
+                    }
+                }
+                AssertTrue(found, "no ContactReport emitted at all");
+                AssertTrue(observedY > 0.5f,
+                    $"contact normal Y={observedY:F3} — expected close to 1 for a body sitting on a flat ground");
             }
         }
 

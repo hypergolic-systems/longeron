@@ -39,12 +39,26 @@ namespace Longeron.Native
     }
 
     /// <summary>
-    /// Mirrors <c>longeron::ShapeKind</c>. Phase 1 only Box; Phase 2+
-    /// extends with Sphere, Capsule, ConvexHull, Mesh.
+    /// Mirrors <c>longeron::ShapeKind</c>. Phase 1.5 supports Box,
+    /// Sphere, ConvexHull. Phase 2+ extends with Capsule, Cylinder,
+    /// Mesh.
     /// </summary>
     public enum ShapeKind : byte
     {
-        Box = 0,
+        Box        = 0,
+        Sphere     = 1,
+        ConvexHull = 2,
+    }
+
+    /// <summary>
+    /// Wire-level cap on vertices passed to a single ConvexHull
+    /// sub-shape. Mirrors <c>longeron::kMaxConvexHullVertices</c>.
+    /// Caller is expected to pre-simplify large meshes; the bridge
+    /// truncates with a warning if exceeded.
+    /// </summary>
+    public static class ShapeLimits
+    {
+        public const int MaxConvexHullVertices = 256;
     }
 
     /// <summary>
@@ -93,31 +107,55 @@ namespace Longeron.Native
         }
 
         // -- Record writers -----------------------------------------------
+        //
+        // BodyCreate is variable-length: a fixed prefix (user_id,
+        // body_type, layer, body pose, mass, shape_count) followed by
+        // shape_count sub-shape records. Each sub-shape carries its own
+        // local transform (relative to the body's frame) plus the
+        // shape kind and kind-specific params.
+        //
+        // Wire layout for the BodyCreate record:
+        //   tag(1) + user_id(4) + body_type(1) + layer(1)
+        //          + body_pos(double3=24) + body_rot(float4=16) + mass(4)
+        //          + shape_count(u8)
+        //          + shape_count × {
+        //              sub_pos(float3=12) + sub_rot(float4=16) + kind(u8)
+        //              + kind-specific params (Box: 12, Sphere: 4,
+        //                ConvexHull: 4 + 12·N)
+        //            }
+        //
+        // Public API:
+        //   - BeginBodyCreate(...) writes the fixed prefix.
+        //   - AppendShape{Box,Sphere,ConvexHull} appends one sub-shape.
+        //   - Caller must know the shape_count up front and call
+        //     Append exactly that many times. There is no End/finalize
+        //     — once the count and all sub-shapes are written, the
+        //     record is complete.
+        //
+        // Convenience single-shape writers (WriteBodyCreate{Box,Sphere,
+        // ConvexHull}) wrap the above for the common one-collider case.
 
         /// <summary>
-        /// Create a body with a box collider. Layout matches
-        /// <c>longeron::LongeronWorld::HandleBodyCreate</c>:
-        /// tag(1) + user_id(4) + body_type(1) + shape_kind(1)
-        /// + half_extents(float3=12) + pos(double3=24) + rot(float4=16)
-        /// + mass(float=4) + layer(1) = 64 bytes.
+        /// Write the BodyCreate record's fixed prefix (everything up
+        /// to and including <paramref name="shapeCount"/>). Caller
+        /// then appends <paramref name="shapeCount"/> sub-shapes via
+        /// <see cref="AppendShapeBox"/> / <see cref="AppendShapeSphere"/>
+        /// / <see cref="AppendShapeConvexHull"/>.
         /// </summary>
-        public void WriteBodyCreateBox(
+        public void BeginBodyCreate(
             BodyHandle body, BodyType bodyType, Layer layer,
-            float halfX, float halfY, float halfZ,
             double posX, double posY, double posZ,
             float rotX, float rotY, float rotZ, float rotW,
-            float mass)
+            float mass, byte shapeCount)
         {
-            const int kSize = 64;
-            EnsureCapacity(kSize);
+            const int kPrefix = 1 /*tag*/ + 4 /*user_id*/ + 1 /*body_type*/ + 1 /*layer*/
+                              + 24 /*pos*/ + 16 /*rot*/ + 4 /*mass*/ + 1 /*shape_count*/;
+            EnsureCapacity(kPrefix);
             byte* p = _ptr + _len;
             *p++ = (byte)RecordType.BodyCreate;
             *(uint*)p = body.Id;            p += 4;
             *p++ = (byte)bodyType;
-            *p++ = (byte)ShapeKind.Box;
-            *(float*)p = halfX;             p += 4;
-            *(float*)p = halfY;             p += 4;
-            *(float*)p = halfZ;             p += 4;
+            *p++ = (byte)layer;
             *(double*)p = posX;             p += 8;
             *(double*)p = posY;             p += 8;
             *(double*)p = posZ;             p += 8;
@@ -126,8 +164,127 @@ namespace Longeron.Native
             *(float*)p = rotZ;              p += 4;
             *(float*)p = rotW;              p += 4;
             *(float*)p = mass;              p += 4;
-            *p++ = (byte)layer;
+            *p++ = shapeCount;
+            _len += kPrefix;
+        }
+
+        public void AppendShapeBox(
+            float subPosX, float subPosY, float subPosZ,
+            float subRotX, float subRotY, float subRotZ, float subRotW,
+            float halfX, float halfY, float halfZ)
+        {
+            // sub_pos(12) + sub_rot(16) + kind(1) + half_extents(12) = 41
+            const int kSize = 41;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *(float*)p = subPosX;           p += 4;
+            *(float*)p = subPosY;           p += 4;
+            *(float*)p = subPosZ;           p += 4;
+            *(float*)p = subRotX;           p += 4;
+            *(float*)p = subRotY;           p += 4;
+            *(float*)p = subRotZ;           p += 4;
+            *(float*)p = subRotW;           p += 4;
+            *p++ = (byte)ShapeKind.Box;
+            *(float*)p = halfX;             p += 4;
+            *(float*)p = halfY;             p += 4;
+            *(float*)p = halfZ;             p += 4;
             _len += kSize;
+        }
+
+        public void AppendShapeSphere(
+            float subPosX, float subPosY, float subPosZ,
+            float subRotX, float subRotY, float subRotZ, float subRotW,
+            float radius)
+        {
+            // sub_pos(12) + sub_rot(16) + kind(1) + radius(4) = 33
+            const int kSize = 33;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *(float*)p = subPosX;           p += 4;
+            *(float*)p = subPosY;           p += 4;
+            *(float*)p = subPosZ;           p += 4;
+            *(float*)p = subRotX;           p += 4;
+            *(float*)p = subRotY;           p += 4;
+            *(float*)p = subRotZ;           p += 4;
+            *(float*)p = subRotW;           p += 4;
+            *p++ = (byte)ShapeKind.Sphere;
+            *(float*)p = radius;            p += 4;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Append a ConvexHull sub-shape. <paramref name="vertices"/>
+        /// is xyz-packed (length must be a multiple of 3) in the
+        /// sub-shape's local frame. Vertices beyond
+        /// <see cref="ShapeLimits.MaxConvexHullVertices"/> are still
+        /// transmitted but the bridge truncates with a warning.
+        /// </summary>
+        public void AppendShapeConvexHull(
+            float subPosX, float subPosY, float subPosZ,
+            float subRotX, float subRotY, float subRotZ, float subRotW,
+            float[] vertices)
+        {
+            if (vertices == null || vertices.Length == 0 || (vertices.Length % 3) != 0)
+                throw new ArgumentException("vertices must be a non-empty xyz-packed array",
+                                             nameof(vertices));
+
+            uint vertCount = (uint)(vertices.Length / 3);
+            // sub_pos(12) + sub_rot(16) + kind(1) + count(4) + vertCount*12
+            int kSize = 33 + (int)vertCount * 12;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *(float*)p = subPosX;           p += 4;
+            *(float*)p = subPosY;           p += 4;
+            *(float*)p = subPosZ;           p += 4;
+            *(float*)p = subRotX;           p += 4;
+            *(float*)p = subRotY;           p += 4;
+            *(float*)p = subRotZ;           p += 4;
+            *(float*)p = subRotW;           p += 4;
+            *p++ = (byte)ShapeKind.ConvexHull;
+            *(uint*)p = vertCount;          p += 4;
+            for (int i = 0; i < vertices.Length; ++i)
+            {
+                *(float*)p = vertices[i];   p += 4;
+            }
+            _len += kSize;
+        }
+
+        // -- Convenience wrappers (single sub-shape, identity transform) --
+
+        public void WriteBodyCreateBox(
+            BodyHandle body, BodyType bodyType, Layer layer,
+            float halfX, float halfY, float halfZ,
+            double posX, double posY, double posZ,
+            float rotX, float rotY, float rotZ, float rotW,
+            float mass)
+        {
+            BeginBodyCreate(body, bodyType, layer, posX, posY, posZ,
+                            rotX, rotY, rotZ, rotW, mass, shapeCount: 1);
+            AppendShapeBox(0, 0, 0, 0, 0, 0, 1, halfX, halfY, halfZ);
+        }
+
+        public void WriteBodyCreateSphere(
+            BodyHandle body, BodyType bodyType, Layer layer,
+            float radius,
+            double posX, double posY, double posZ,
+            float rotX, float rotY, float rotZ, float rotW,
+            float mass)
+        {
+            BeginBodyCreate(body, bodyType, layer, posX, posY, posZ,
+                            rotX, rotY, rotZ, rotW, mass, shapeCount: 1);
+            AppendShapeSphere(0, 0, 0, 0, 0, 0, 1, radius);
+        }
+
+        public void WriteBodyCreateConvexHull(
+            BodyHandle body, BodyType bodyType, Layer layer,
+            float[] vertices,
+            double posX, double posY, double posZ,
+            float rotX, float rotY, float rotZ, float rotW,
+            float mass)
+        {
+            BeginBodyCreate(body, bodyType, layer, posX, posY, posZ,
+                            rotX, rotY, rotZ, rotW, mass, shapeCount: 1);
+            AppendShapeConvexHull(0, 0, 0, 0, 0, 0, 1, vertices);
         }
 
         /// <summary>

@@ -28,7 +28,10 @@ namespace Longeron.Native
 
         public static LongeronConfig Default => new LongeronConfig
         {
-            SchemaVersion  = 1,
+            // Schema version 2: BodyCreate gained a variable-length
+            // sub-shape list (Phase 1.5) — Box, Sphere, ConvexHull
+            // packed with per-sub-shape local transform.
+            SchemaVersion  = 2,
             Reserved0      = 0,
             GravityX       = 0.0,
             GravityY       = 0.0,

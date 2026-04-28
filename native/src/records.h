@@ -41,11 +41,25 @@ enum class BodyType : uint8_t {
     Dynamic   = 2,
 };
 
-// Shape kinds. Phase 1: Box. Phase 2+ extends with Sphere, Capsule,
-// ConvexHull, Mesh, etc.
+// Shape kinds. Phase 1.5: Box, Sphere, ConvexHull. Phase 2+ extends
+// with Capsule, Cylinder, MeshShape (non-convex).
+//
+// Encoding within a BodyCreate record's sub-shape list:
+//   Box        — float3 half_extents (12 bytes)
+//   Sphere     — float radius        (4 bytes)
+//   ConvexHull — u32 vertex_count + vertex_count × float3
+//                (4 + 12·N bytes; N capped at kMaxConvexHullVertices)
 enum class ShapeKind : uint8_t {
-    Box   = 0,   // float3 half-extents
+    Box        = 0,
+    Sphere     = 1,
+    ConvexHull = 2,
 };
+
+// Cap on vertices passed to JPH::ConvexHullShapeSettings. Jolt itself
+// will simplify if the hull is degenerate; we cap on the wire to
+// bound input-buffer growth and to surface "absurd mesh" cases as
+// truncation warnings rather than silently massive payloads.
+inline constexpr uint32_t kMaxConvexHullVertices = 256;
 
 // Object layer assignments (Phase 1). Phase 2 will extend with
 // per-vessel layers for self-collision filtering.
