@@ -46,18 +46,24 @@ namespace Longeron
         }
 
         // Krakensbane / FloatingOrigin shifted Unity's world origin.
-        // Translate every body in our Jolt world by the SAME delta so
-        // pose readback to Unity rigidbodies continues to render the
-        // vessel where the camera is looking. The signature carries
-        // both the Krakensbane component and the non-Krakensbane
-        // (FloatingOrigin) component; sum them for the full shift.
+        // Translate every Jolt body by the same delta KSP applied to
+        // active flying vessel rigidbodies — that's just the
+        // Krakensbane component (`offset`), NOT
+        // `offsetNonKrakensbane` (= `offset + nonKrakensbane`). See
+        // ~/dev/ksp-reference/source/Assembly-CSharp/FloatingOrigin.cs:
+        //   line 311: vessel.SetPosition(transform.position - vector3d2)
+        //   line 252: vector3d2 = offset (for non-packed, non-landed)
+        //   line 257: vector3d2 = offsetNonKrakensbane (for packed/landed)
+        // We over-shifted by `nonKrakensbane` per event before, which
+        // visibly desynced the vessel from the camera's view as
+        // FloatingOrigin shifts accumulated. Synthetic ground and
+        // future static geometry technically want
+        // `offsetNonKrakensbane` to track terrain — Phase 3
+        // territory. For now Phase 2.4 covers active vessels.
         void OnFloatingOriginShift(Vector3d offset, Vector3d nonKrakensbane)
         {
             if (ActiveWorld == null) return;
-            // KSP applies the offset to stock objects' rb.position via
-            // `rb.position -= offset`. Mirror that on Jolt: subtract
-            // offset (and nonKrakensbane) from every body's position.
-            Vector3d delta = -(offset + nonKrakensbane);
+            Vector3d delta = -offset;
             ActiveWorld.Input.WriteShiftWorld(delta.x, delta.y, delta.z);
         }
 
