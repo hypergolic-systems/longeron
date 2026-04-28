@@ -110,7 +110,10 @@ namespace Longeron
                         world.Output.ReadBodyPose(out var pose);
                         if (SceneRegistry.TryGetPart(pose.Body.Id, out var part) && part?.rb != null)
                         {
-                            ApplyPoseToRigidbody(part.rb, pose);
+                            var jb = part.gameObject != null
+                                       ? part.gameObject.GetComponent<JoltBody>()
+                                       : null;
+                            ApplyPoseToRigidbody(part.rb, pose, jb);
                             posesWritten++;
                         }
                         break;
@@ -155,12 +158,51 @@ namespace Longeron
         // doesn't try to integrate). Velocity writes feed
         // vessel.velocityD / orbit-driver via the
         // OrbitDriverKinematicBypass patch.
-        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose)
+        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose, JoltBody jb)
         {
             rb.position = new Vector3((float)pose.PosX, (float)pose.PosY, (float)pose.PosZ);
             rb.rotation = new Quaternion(pose.RotX, pose.RotY, pose.RotZ, pose.RotW);
-            rb.velocity = new Vector3(pose.LinX, pose.LinY, pose.LinZ);
-            rb.angularVelocity = new Vector3(pose.AngX, pose.AngY, pose.AngZ);
+
+            // Unity silently drops rb.velocity / rb.angularVelocity
+            // writes on kinematic rigidbodies. Stash the analytic
+            // Jolt velocity on the JoltBody component instead — our
+            // refresh path and any reader-patches read from there.
+            var vel = new Vector3(pose.LinX, pose.LinY, pose.LinZ);
+            var angVel = new Vector3(pose.AngX, pose.AngY, pose.AngZ);
+            if (jb != null)
+            {
+                jb.LastVelocity = vel;
+                jb.LastAngularVelocity = angVel;
+            }
+            // Try the rb.velocity write anyway — for non-kinematic rbs
+            // (e.g., if a future Phase moves to dynamic rbs) this is
+            // the right thing; for kinematic, it's a silent no-op.
+            rb.velocity = vel;
+            rb.angularVelocity = angVel;
+        }
+
+        // Diagnostic: instance-level so we can throttle a per-second log
+        // without spamming.
+        static long _diagTick;
+        public static void DiagPostfixVelocity(Vessel v)
+        {
+            _diagTick++;
+            if ((_diagTick % 50) != 0) return;
+            if (v?.rootPart?.rb == null) return;
+            var rb = v.rootPart.rb;
+            Debug.Log(string.Format(
+                "[Longeron/diag-vel] v={0} rb.vel=({1:F3},{2:F3},{3:F3}) " +
+                "isKin={4} velD=({5:F2},{6:F2},{7:F2}) srf=({8:F2},{9:F2},{10:F2}) " +
+                "srfSpeed={11:F2} obtSpeed={12:F2} fv=({13:F2},{14:F2},{15:F2})",
+                v.vesselName,
+                rb.velocity.x, rb.velocity.y, rb.velocity.z,
+                rb.isKinematic,
+                v.velocityD.x, v.velocityD.y, v.velocityD.z,
+                v.srf_velocity.x, v.srf_velocity.y, v.srf_velocity.z,
+                v.srfSpeed, v.obt_speed,
+                Krakensbane.GetFrameVelocity().x,
+                Krakensbane.GetFrameVelocity().y,
+                Krakensbane.GetFrameVelocity().z));
         }
 
         // Refresh vessel-level derived velocity fields from rb state
@@ -179,18 +221,24 @@ namespace Longeron
             if (v.rootPart == null || v.rootPart.rb == null) return;
             if (v.orbit == null || v.mainBody == null) return;
 
-            // rb.velocity directly (NOT GetPointVelocity — that
-            // returns 0 for kinematic rbs in Unity, despite us
-            // writing rb.velocity each tick from Jolt's pose
-            // readback).
+            // Source the velocity from JoltBody.LastVelocity — Unity
+            // discards rb.velocity writes on kinematic rbs, so reading
+            // rb.velocity directly always gives 0. JoltBody stashed
+            // the analytic Jolt velocity at pose readback time.
             //
-            // We integrate in the rotating frame (Krakensbane keeps
-            // Unity world rotating with the surface), so rb.velocity
-            // IS the surface-frame velocity. velocityD = rb.velocity +
-            // FrameVelocity (Krakensbane's drained inertial component
-            // — non-zero only at high speeds). Inertial-frame velocity
-            // = velocityD + body's surface rotation at our position.
-            Vector3d rbVel = (Vector3d)v.rootPart.rb.velocity;
+            // Jolt integrates in the rotating frame (Krakensbane
+            // keeps Unity world rotating with the surface), so this
+            // is surface-frame velocity. velocityD = rotating-frame
+            // velocity + Krakensbane.FrameVelocity (the inertial
+            // component drained at high speeds). Inertial-frame
+            // velocity = velocityD + body's surface rotation at our
+            // position.
+            var rootJb = v.rootPart.gameObject != null
+                            ? v.rootPart.gameObject.GetComponent<JoltBody>()
+                            : null;
+            Vector3d rbVel = rootJb != null
+                              ? (Vector3d)rootJb.LastVelocity
+                              : (Vector3d)v.rootPart.rb.velocity;
             v.rb_velocity = (Vector3)rbVel;
             v.rb_velocityD = rbVel;
             v.velocityD = rbVel + Krakensbane.GetFrameVelocity();

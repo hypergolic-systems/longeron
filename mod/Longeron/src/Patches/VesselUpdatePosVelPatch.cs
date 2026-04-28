@@ -21,6 +21,7 @@ namespace Longeron.Patches
             if (__instance == null) return;
             if (!SceneRegistry.TryGet(__instance, out _)) return;
             LongeronSceneDriver.RefreshVesselVelocityFields(__instance);
+            LongeronSceneDriver.DiagPostfixVelocity(__instance);
         }
     }
 }

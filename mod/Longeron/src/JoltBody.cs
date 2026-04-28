@@ -20,6 +20,15 @@ namespace Longeron
         public BodyHandle Handle;
         public Part Part;
 
+        // The latest analytic Jolt-integrated velocity for this part,
+        // stored at pose readback. Unity silently discards rb.velocity
+        // writes on kinematic rigidbodies, so reading rb.velocity gives
+        // 0 — useless for navball / orbit / aero / parachute deploy
+        // gates. Anywhere stock reads rb.velocity, we either patch the
+        // reader or compute the same field from this stored value.
+        public Vector3 LastVelocity;
+        public Vector3 LastAngularVelocity;
+
         public static JoltBody AttachTo(Part part, BodyHandle handle)
         {
             if (part == null || part.gameObject == null) return null;
