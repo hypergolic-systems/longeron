@@ -56,6 +56,9 @@ namespace Longeron
             ActiveWorld = new World(LongeronConfig.Default);
             Debug.Log(LogPrefix + "world created for flight scene");
 
+            var driver = GetComponent<LongeronSceneDriver>();
+            if (driver != null) driver.NotifyWorldCreated();
+
             // Sweep already-unpacked vessels — VesselModule.OnGoOffRails
             // for these fired before ActiveWorld existed. Each vessel's
             // module instance can re-issue the register manually.

@@ -30,6 +30,13 @@ namespace Longeron
         long _tick;
         bool _groundSpawned;
 
+        // Called by LongeronAddon when a new flight-scene world is
+        // created so per-world transient state resets.
+        internal void NotifyWorldCreated()
+        {
+            _groundSpawned = false;
+        }
+
         // Contact-log throttle: log at most kLogEveryTicks ticks worth
         // of contacts in detail; otherwise emit a one-line summary
         // each tick. KSP's FixedUpdate is 50 Hz, so 50 → ~1s.
