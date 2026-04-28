@@ -188,10 +188,16 @@ namespace Longeron
             v.rb_velocityD = rbVelAtCoM;
             v.velocityD = (Vector3d)rbVelAtCoM + Krakensbane.GetFrameVelocity();
 
+            // Re-run UpdateOrbit so TrackRigidbody picks up the fresh
+            // velocityD we just wrote (the order-0 invocation read a
+            // stale value from last tick's pose readback). Our
+            // OrbitDriverKinematicBypass patch un-kinematics for the
+            // duration so the kinematic-rb early-return doesn't skip
+            // the velocity refresh inside TrackRigidbody.
+            if (v.orbitDriver != null) v.orbitDriver.UpdateOrbit(offset: false);
+
             // Vessel.cs:3530-3556 — derive srf_velocity, obt_velocity,
-            // and the speed scalars. orbit.GetVel/GetRelativeVel were
-            // refreshed by TrackRigidbody (with our kinematic bypass)
-            // earlier this tick, so they're current.
+            // and the speed scalars from the now-fresh orbit state.
             v.obt_velocity = v.orbit.GetRelativeVel();
             v.obt_speed = v.obt_velocity.magnitude;
             v.srf_velocity = v.orbit.GetVel() - v.mainBody.getRFrmVelOrbit(v.orbit);
