@@ -127,6 +127,15 @@ namespace Longeron
             // Suppress unused warning until the Phase 2 pose-readback log lands.
             _ = posesWritten;
 
+            // After pose readback, rb.velocity is current — refresh
+            // each managed vessel's derived velocity fields so the
+            // navball / SAS / aero / orbit displays read correct
+            // values this same tick.
+            foreach (var mv in SceneRegistry.Vessels)
+            {
+                RefreshVesselVelocityFields(mv.Vessel);
+            }
+
             if (contactCount > 0 && (_tick % kLogEveryTicks) == 0)
             {
                 Debug.Log(LogPrefix + string.Format(
@@ -152,6 +161,63 @@ namespace Longeron
             rb.rotation = new Quaternion(pose.RotX, pose.RotY, pose.RotZ, pose.RotW);
             rb.velocity = new Vector3(pose.LinX, pose.LinY, pose.LinZ);
             rb.angularVelocity = new Vector3(pose.AngX, pose.AngY, pose.AngZ);
+        }
+
+        // Refresh vessel-level derived velocity fields from rb state
+        // after pose readback. Stock VesselPrecalculate.CalculatePhysicsStats
+        // + Vessel.UpdatePosVel runs at execution order 0 — i.e. before
+        // our +10000 pose writeback — so srf_velocity / verticalSpeed /
+        // srfSpeed lag by one tick at best, and don't update at all in
+        // some kinematic-rb code paths. Replay KSP's logic from
+        // ~/dev/ksp-reference/source/Assembly-CSharp/Vessel.cs:3530+
+        // and VesselPrecalculate.cs:540+ with current rb state.
+        static void RefreshVesselVelocityFields(Vessel v)
+        {
+            if (v == null || !v.loaded || v.packed) return;
+            if (v.rootPart == null || v.rootPart.rb == null) return;
+            if (v.orbit == null || v.mainBody == null) return;
+
+            // Per VesselPrecalculate.cs:540-560, velocityD is the
+            // mass-weighted sum of part.rb.velocity over all parts +
+            // FrameVelocity. For Phase 2.x with one rb per part,
+            // approximate by using the root rb's velocity at the CoM
+            // as a stand-in for the weighted average — same value for
+            // a rigid stack.
+            Vector3 rbVelAtCoM = v.rootPart.rb.GetPointVelocity(v.CoMD);
+            v.rb_velocity = rbVelAtCoM;
+            v.rb_velocityD = rbVelAtCoM;
+            v.velocityD = (Vector3d)rbVelAtCoM + Krakensbane.GetFrameVelocity();
+
+            // Vessel.cs:3530-3556 — derive srf_velocity, obt_velocity,
+            // and the speed scalars. orbit.GetVel/GetRelativeVel were
+            // refreshed by TrackRigidbody (with our kinematic bypass)
+            // earlier this tick, so they're current.
+            v.obt_velocity = v.orbit.GetRelativeVel();
+            v.obt_speed = v.obt_velocity.magnitude;
+            v.srf_velocity = v.orbit.GetVel() - v.mainBody.getRFrmVelOrbit(v.orbit);
+            v.upAxis = FlightGlobals.getUpAxis(v.mainBody, v.CoMD);
+            v.verticalSpeed = Vector3d.Dot(v.obt_velocity, v.upAxis);
+            double sqrMag = v.srf_velocity.sqrMagnitude;
+            if (sqrMag > 0.0)
+            {
+                v.srfSpeed = System.Math.Sqrt(sqrMag);
+                v.srf_vel_direction = v.srf_velocity / v.srfSpeed;
+                double horiz = sqrMag - v.verticalSpeed * v.verticalSpeed;
+                v.horizontalSrfSpeed = (horiz > 0.0 && !double.IsNaN(horiz))
+                                        ? System.Math.Sqrt(horiz) : 0.0;
+            }
+            else
+            {
+                v.srfSpeed = 0.0;
+                v.horizontalSrfSpeed = 0.0;
+                v.srf_vel_direction = Vector3d.zero;
+            }
+
+            // Angular velocity in vessel-local frame (matches
+            // VesselPrecalculate:645).
+            v.angularVelocity = Quaternion.Inverse(v.ReferenceTransform.rotation)
+                              * v.rootPart.rb.angularVelocity;
+            v.angularVelocityD = v.angularVelocity;
         }
 
         // Synthetic launchpad surrogate: a 50 m × 0.5 m × 50 m static
