@@ -189,30 +189,47 @@ namespace Longeron
             Vector3 gDir = g / gMag;          // points "down"
             Vector3 upDir = -gDir;            // points "up"
 
-            // Find the part farthest along -gDir (the deepest part).
-            // Project each part's offset from rootPos onto -gDir and
-            // pick the smallest projection — that's the lowest along
-            // the gravity axis.
-            float lowestProj = 0f;
+            // Find the lowest collider point across all parts'
+            // bounds, projected along the gravity-up direction.
+            // Using collider AABBs (not just transform pivots)
+            // matches the actual geometry — engine bells extend well
+            // below their transform, and KSP placed the vessel so
+            // the lowest collider point IS at the launchpad surface.
+            // Spawning the synthetic ground exactly there puts the
+            // vessel at its natural rest height — no fall, no
+            // penetration, no buried-in-pad.
+            float lowestProj = float.PositiveInfinity;
             foreach (var mv in SceneRegistry.Vessels)
             {
                 if (mv.Vessel == null) continue;
                 foreach (var part in mv.Vessel.parts)
                 {
-                    if (part?.transform == null) continue;
-                    Vector3 offset = part.transform.position - rootPos;
-                    float proj = Vector3.Dot(offset, upDir);
-                    if (proj < lowestProj) lowestProj = proj;
+                    if (part == null) continue;
+                    foreach (var col in part.GetComponentsInChildren<Collider>(includeInactive: false))
+                    {
+                        if (col == null || col.isTrigger || !col.enabled) continue;
+                        Bounds b = col.bounds;
+                        // The bounds are an AABB in world coords. The
+                        // extreme along -upDir is the most negative
+                        // dot of any of the 8 corners with upDir.
+                        // Cheap upper-bound: use bounds.center ±
+                        // bounds.extents projected onto upDir.
+                        float centerProj = Vector3.Dot(b.center - rootPos, upDir);
+                        float extentProj = Mathf.Abs(b.extents.x * upDir.x)
+                                         + Mathf.Abs(b.extents.y * upDir.y)
+                                         + Mathf.Abs(b.extents.z * upDir.z);
+                        float minProj = centerProj - extentProj;
+                        if (minProj < lowestProj) lowestProj = minProj;
+                    }
                 }
             }
+            if (float.IsInfinity(lowestProj) || float.IsNaN(lowestProj)) lowestProj = 0f;
 
-            // Ground top face sits 0.5 m below the lowest part along
-            // the gravity axis. Box halfY = 0.25 m, so center is
-            // halfY further down.
-            const float kHalfY     = 0.25f;
-            const float kClearance = 0.5f;
-            Vector3 lowestPos = rootPos + upDir * lowestProj;
-            Vector3 groundCenter = lowestPos + gDir * (kClearance + kHalfY);
+            const float kHalfY = 0.25f;
+            // Ground top face exactly at the lowest collider point.
+            // Body center sits halfY below that.
+            Vector3 lowestPos    = rootPos + upDir * lowestProj;
+            Vector3 groundCenter = lowestPos + gDir * kHalfY;
 
             // Rotation that maps the box's natural up (+Y_local) to
             // the world's gravity-up direction.
@@ -228,9 +245,10 @@ namespace Longeron
 
             _groundSpawned = true;
             Debug.Log(LogPrefix + string.Format(
-                "synthetic ground spawned: center=({0:F2},{1:F2},{2:F2}) up=({3:F2},{4:F2},{5:F2}) — vessel '{6}'",
+                "synthetic ground spawned: center=({0:F2},{1:F2},{2:F2}) up=({3:F2},{4:F2},{5:F2}) lowestProj={6:F2} — vessel '{7}'",
                 groundCenter.x, groundCenter.y, groundCenter.z,
                 upDir.x, upDir.y, upDir.z,
+                lowestProj,
                 anchorVessel.vesselName));
         }
     }
