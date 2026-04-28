@@ -166,12 +166,14 @@ namespace Longeron
         // Refresh vessel-level derived velocity fields from rb state
         // after pose readback. Stock VesselPrecalculate.CalculatePhysicsStats
         // + Vessel.UpdatePosVel runs at execution order 0 — i.e. before
-        // our +10000 pose writeback — so srf_velocity / verticalSpeed /
-        // srfSpeed lag by one tick at best, and don't update at all in
-        // some kinematic-rb code paths. Replay KSP's logic from
+        // our +10000 pose writeback — and again from per-frame Update,
+        // so the values would lag at best and get clobbered between our
+        // write and the navball read. Replay KSP's logic from
         // ~/dev/ksp-reference/source/Assembly-CSharp/Vessel.cs:3530+
         // and VesselPrecalculate.cs:540+ with current rb state.
-        static void RefreshVesselVelocityFields(Vessel v)
+        // Public static so VesselUpdatePosVelPatch can call it as a
+        // postfix on every stock UpdatePosVel invocation.
+        public static void RefreshVesselVelocityFields(Vessel v)
         {
             if (v == null || !v.loaded || v.packed) return;
             if (v.rootPart == null || v.rootPart.rb == null) return;
