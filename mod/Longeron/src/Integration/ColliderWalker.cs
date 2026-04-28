@@ -44,7 +44,8 @@ namespace Longeron.Integration
             Part part,
             BodyType bodyType,
             Layer layer,
-            float massKg)
+            float massKg,
+            uint groupId)
         {
             // Part transform anchors the body's frame.
             var partXform = part.transform;
@@ -96,7 +97,8 @@ namespace Longeron.Integration
                 posX: partWorldPos.x, posY: partWorldPos.y, posZ: partWorldPos.z,
                 rotX: partWorldRot.x, rotY: partWorldRot.y, rotZ: partWorldRot.z, rotW: partWorldRot.w,
                 mass: massKg,
-                shapeCount: (byte)subShapes.Count);
+                shapeCount: (byte)subShapes.Count,
+                groupId: groupId);
 
             foreach (var sub in subShapes)
             {

@@ -28,10 +28,10 @@ namespace Longeron.Native
 
         public static LongeronConfig Default => new LongeronConfig
         {
-            // Schema version 2: BodyCreate gained a variable-length
-            // sub-shape list (Phase 1.5) — Box, Sphere, ConvexHull
-            // packed with per-sub-shape local transform.
-            SchemaVersion  = 2,
+            // Schema version 3: BodyCreate gained group_id (Phase 2.2)
+            // for per-vessel collision filtering. Schema version 2
+            // (Phase 1.5) added variable-length sub-shape list.
+            SchemaVersion  = 3,
             Reserved0      = 0,
             GravityX       = 0.0,
             GravityY       = 0.0,

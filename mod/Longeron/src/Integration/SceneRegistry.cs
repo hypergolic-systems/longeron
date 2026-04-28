@@ -42,6 +42,11 @@ namespace Longeron.Integration
         // independently of bodies.
         static uint _nextConstraintId = 1;
 
+        // Per-vessel collision group IDs. 0 is reserved for "no
+        // group" (terrain / synthetic ground / global static
+        // geometry). Each vessel that registers gets a fresh ID.
+        static uint _nextGroupId = 1;
+
         public static IEnumerable<ManagedVessel> Vessels => _vessels.Values;
 
         public static int Count => _vessels.Count;
@@ -56,10 +61,15 @@ namespace Longeron.Integration
             return _nextConstraintId++;
         }
 
+        public static uint MintVesselGroupId()
+        {
+            return _nextGroupId++;
+        }
+
         public static ManagedVessel Register(Vessel vessel)
         {
             if (_vessels.TryGetValue(vessel, out var existing)) return existing;
-            var mv = new ManagedVessel(vessel);
+            var mv = new ManagedVessel(vessel, MintVesselGroupId());
             _vessels[vessel] = mv;
             return mv;
         }

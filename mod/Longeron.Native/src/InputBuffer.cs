@@ -118,13 +118,13 @@ namespace Longeron.Native
         // -- Record writers -----------------------------------------------
         //
         // BodyCreate is variable-length: a fixed prefix (user_id,
-        // body_type, layer, body pose, mass, shape_count) followed by
-        // shape_count sub-shape records. Each sub-shape carries its own
-        // local transform (relative to the body's frame) plus the
-        // shape kind and kind-specific params.
+        // body_type, layer, group_id, body pose, mass, shape_count)
+        // followed by shape_count sub-shape records. Each sub-shape
+        // carries its own local transform (relative to the body's
+        // frame) plus the shape kind and kind-specific params.
         //
         // Wire layout for the BodyCreate record:
-        //   tag(1) + user_id(4) + body_type(1) + layer(1)
+        //   tag(1) + user_id(4) + body_type(1) + layer(1) + group_id(4)
         //          + body_pos(double3=24) + body_rot(float4=16) + mass(4)
         //          + shape_count(u8)
         //          + shape_count × {
@@ -132,6 +132,11 @@ namespace Longeron.Native
         //              + kind-specific params (Box: 12, Sphere: 4,
         //                ConvexHull: 4 + 12·N)
         //            }
+        //
+        // group_id semantics: 0 = collide with everything (terrain,
+        // synthetic ground, anything outside any vessel). Non-zero =
+        // bodies sharing the same group_id skip collision with each
+        // other (intra-vessel filtering).
         //
         // Public API:
         //   - BeginBodyCreate(...) writes the fixed prefix.
@@ -155,9 +160,10 @@ namespace Longeron.Native
             BodyHandle body, BodyType bodyType, Layer layer,
             double posX, double posY, double posZ,
             float rotX, float rotY, float rotZ, float rotW,
-            float mass, byte shapeCount)
+            float mass, byte shapeCount, uint groupId = 0)
         {
             const int kPrefix = 1 /*tag*/ + 4 /*user_id*/ + 1 /*body_type*/ + 1 /*layer*/
+                              + 4 /*group_id*/
                               + 24 /*pos*/ + 16 /*rot*/ + 4 /*mass*/ + 1 /*shape_count*/;
             EnsureCapacity(kPrefix);
             byte* p = _ptr + _len;
@@ -165,6 +171,7 @@ namespace Longeron.Native
             *(uint*)p = body.Id;            p += 4;
             *p++ = (byte)bodyType;
             *p++ = (byte)layer;
+            *(uint*)p = groupId;            p += 4;
             *(double*)p = posX;             p += 8;
             *(double*)p = posY;             p += 8;
             *(double*)p = posZ;             p += 8;
@@ -265,10 +272,12 @@ namespace Longeron.Native
             float halfX, float halfY, float halfZ,
             double posX, double posY, double posZ,
             float rotX, float rotY, float rotZ, float rotW,
-            float mass)
+            float mass, uint groupId = 0)
         {
-            BeginBodyCreate(body, bodyType, layer, posX, posY, posZ,
-                            rotX, rotY, rotZ, rotW, mass, shapeCount: 1);
+            BeginBodyCreate(body, bodyType, layer,
+                            posX, posY, posZ,
+                            rotX, rotY, rotZ, rotW,
+                            mass, shapeCount: 1, groupId: groupId);
             AppendShapeBox(0, 0, 0, 0, 0, 0, 1, halfX, halfY, halfZ);
         }
 
@@ -277,10 +286,12 @@ namespace Longeron.Native
             float radius,
             double posX, double posY, double posZ,
             float rotX, float rotY, float rotZ, float rotW,
-            float mass)
+            float mass, uint groupId = 0)
         {
-            BeginBodyCreate(body, bodyType, layer, posX, posY, posZ,
-                            rotX, rotY, rotZ, rotW, mass, shapeCount: 1);
+            BeginBodyCreate(body, bodyType, layer,
+                            posX, posY, posZ,
+                            rotX, rotY, rotZ, rotW,
+                            mass, shapeCount: 1, groupId: groupId);
             AppendShapeSphere(0, 0, 0, 0, 0, 0, 1, radius);
         }
 
@@ -289,10 +300,12 @@ namespace Longeron.Native
             float[] vertices,
             double posX, double posY, double posZ,
             float rotX, float rotY, float rotZ, float rotW,
-            float mass)
+            float mass, uint groupId = 0)
         {
-            BeginBodyCreate(body, bodyType, layer, posX, posY, posZ,
-                            rotX, rotY, rotZ, rotW, mass, shapeCount: 1);
+            BeginBodyCreate(body, bodyType, layer,
+                            posX, posY, posZ,
+                            rotX, rotY, rotZ, rotW,
+                            mass, shapeCount: 1, groupId: groupId);
             AppendShapeConvexHull(0, 0, 0, 0, 0, 0, 1, vertices);
         }
 

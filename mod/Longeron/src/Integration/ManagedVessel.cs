@@ -11,11 +11,16 @@ namespace Longeron.Integration
     internal sealed class ManagedVessel
     {
         public Vessel Vessel { get; }
+        public uint GroupId { get; }
         public List<Part> Parts { get; } = new List<Part>();
         public List<BodyHandle> BodyHandles { get; } = new List<BodyHandle>();
         public List<uint> ConstraintIds { get; } = new List<uint>();
 
-        public ManagedVessel(Vessel vessel) { Vessel = vessel; }
+        public ManagedVessel(Vessel vessel, uint groupId)
+        {
+            Vessel = vessel;
+            GroupId = groupId;
+        }
 
         public void Add(Part part, BodyHandle handle)
         {

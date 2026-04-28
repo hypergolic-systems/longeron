@@ -87,6 +87,7 @@ private:
     BPLayerInterfaceImpl                  mBPLayerInterface;
     ObjectVsBroadPhaseLayerFilterImpl     mObjectVsBPFilter;
     ObjectLayerPairFilterImpl             mObjectVsObjectFilter;
+    JPH::Ref<JPH::GroupFilterTable>       mGroupFilter;
     JPH::PhysicsSystem           mPhysicsSystem;
     std::unique_ptr<ContactListenerImpl>  mContactListener;
 

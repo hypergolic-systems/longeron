@@ -10,6 +10,8 @@
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
+#include <Jolt/Physics/Collision/CollisionGroup.h>
+#include <Jolt/Physics/Collision/GroupFilterTable.h>
 
 namespace longeron {
 
@@ -77,6 +79,20 @@ public:
         return true;
     }
 };
+
+// Per-vessel collision filtering uses Jolt's stock GroupFilterTable
+// rather than a custom subclass — Jolt is statically linked with
+// JPH_EXPORT compiling to nothing, which combined with our hidden
+// default visibility leaves base class typeinfo unexported, breaking
+// derived-class subtyping at link time. GroupFilterTable's built-in
+// CanCollide rules already match what we need:
+//   - One body has cInvalidGroup → collide (terrain / synthetic
+//     ground bypasses the filter).
+//   - Different group IDs → collide (different vessels).
+//   - Same group ID + same SubGroupID → don't collide.
+// We assign one group ID per vessel and a constant SubGroupID = 0
+// for every part, so any two parts in the same vessel skip
+// collision.
 
 } // namespace longeron
 

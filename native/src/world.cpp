@@ -156,6 +156,11 @@ LongeronWorld::LongeronWorld(const ::LongeronConfig& cfg)
     mContactListener = std::make_unique<ContactListenerImpl>(this);
     mPhysicsSystem.SetContactListener(mContactListener.get());
 
+    // 1 sub-group per vessel — every part of a vessel shares
+    // sub_group_id = 0, so GroupFilterTable's "same group + same
+    // subgroup" rule rejects intra-vessel collision pairs.
+    mGroupFilter = new JPH::GroupFilterTable(1);
+
     (void)max_constraints;  // Phase 2+ when constraints land
 }
 
@@ -272,6 +277,7 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
     const uint32_t   user_id   = Read<uint32_t>(cur, end);
     const uint8_t    body_type = Read<uint8_t>(cur, end);
     const uint8_t    layer_id  = Read<uint8_t>(cur, end);
+    const uint32_t   group_id  = Read<uint32_t>(cur, end);
     const JPH::RVec3 pos       = ReadDouble3(cur, end);
     const JPH::Quat  rot       = ReadFloat4Quat(cur, end);
     const float      mass      = Read<float>(cur, end);
@@ -355,6 +361,19 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
     // Without it, our entire architecture silently produces no
     // contacts. Set it on every body we register.
     settings.mCollideKinematicVsNonDynamic = true;
+
+    // Per-vessel collision group: bodies sharing a non-zero group_id
+    // skip collision with each other (sub_group_id = 0 for every
+    // part within a vessel, GroupFilterTable rejects same-subgroup
+    // pairs). group_id = cInvalidGroup makes the body collide with
+    // everything — used for terrain / synthetic ground / global
+    // static geometry.
+    if (group_id == 0) {
+        settings.mCollisionGroup = JPH::CollisionGroup(
+            mGroupFilter, JPH::CollisionGroup::cInvalidGroup, 0);
+    } else {
+        settings.mCollisionGroup = JPH::CollisionGroup(mGroupFilter, group_id, 0);
+    }
 
     if (motion_type == JPH::EMotionType::Dynamic) {
         settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;

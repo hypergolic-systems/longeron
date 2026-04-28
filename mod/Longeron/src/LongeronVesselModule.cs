@@ -44,7 +44,8 @@ namespace Longeron
                 var handle = SceneRegistry.MintBodyHandle();
                 bool ok = ColliderWalker.WriteBodyFor(
                     input, handle, part,
-                    BodyType.Dynamic, Layer.Kinematic, mass);
+                    BodyType.Dynamic, Layer.Kinematic, mass,
+                    groupId: managed.GroupId);
 
                 if (ok)
                 {
