@@ -3,10 +3,13 @@
   <!--
     Longeron — KSP integration plugin.
 
-    Wires Longeron.Physics (reduced-coordinate articulated-body
-    solver) into KSP: vessel lifecycle hooks, part-tree discovery,
-    Harmony patches on joint/decouple/couple paths, FixedUpdate
-    bracketing to read external wrenches and write transforms.
+    Wires Longeron.Native (the C++ Jolt bridge) into KSP: vessel
+    lifecycle hooks, part-tree discovery, collider mirroring, Harmony
+    patches, FixedUpdate bracketing.
+
+    The Phase 4 articulated-body solver lives in Longeron.Physics; that
+    project reference returns once Featherstone gets wired in. Phases
+    1-3 don't reference it.
 
     Targets net48 to match KSP 1.12.5's bundled Mono.
   -->
@@ -64,7 +67,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Longeron.Physics\Longeron.Physics.csproj" />
+    <ProjectReference Include="..\Longeron.Native\Longeron.Native.csproj" />
   </ItemGroup>
 
   <ItemGroup>
