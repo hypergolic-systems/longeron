@@ -1,5 +1,20 @@
 # Longeron — Jolt pivot plan
 
+## Status (2026-04-27)
+
+| Phase | State | Notes |
+|---|---|---|
+| 0 — native foundation | ✅ done | C++ bridge + Jolt v5.5.0 submodule + `Longeron.Native` C# wrapper. Builds on macOS arm64 universal; Win64/Linux untested but CMake config is platform-portable. |
+| 1 — first light (out-of-game) | ✅ done | 12 probe checks green via `just native-probe`. **Load-bearing finding:** kinematic-vs-static / kinematic-vs-kinematic contact callbacks require `BodyCreationSettings.mCollideKinematicVsNonDynamic = true` on every body. Default is false — silently skips contact dispatch otherwise. Documented in project memory. |
+| 1.5 — in-game smoke test | ✅ done | Native bridge loads in KSP via Mono; flight-scene world lifecycle works; one-part vessel managed with **real collider mirroring** (BoxCollider / SphereCollider / convex MeshCollider via `ConvexHullShape`); synthetic 50×0.5×50 m static ground anchored under the lowest part; kinematic-vs-static contact callbacks fire every tick on `SmokeTest` craft. `OrbitDriver.TrackRigidbody` kinematic-rb bypass restored to fix navball / wind-sound flicker. |
+| 2 — multi-part with Jolt joints | ⏳ next | `Rigidbody.AddForce*` redirect, mass updates, pose readback (Jolt → Unity rb), Krakensbane offset tracking, `SixDOFConstraint` for stack/surface attach, capsule colliders. |
+| 2.5 — scene lifecycle | ⏳ | pack/unpack, vessel switch, save/load, scene transitions. |
+| 3 — terrain | ⏳ | KSC static env, PQS streaming, LOD, asteroids/water. |
+| 3.5 — wheels | ⏳ | Custom raycast suspension on Jolt bodies. |
+| 4 — Featherstone | ⏳ | Replaces Jolt joints with ABA. First public release. |
+
+Latest commits on `main` for this work: `c4e7464` (compliance reframe) → `6fe43ef` (pivot docs) → `6db9815` (Phase 0 scaffold) → `706cd92` (Phase 1 contact verification) → `83c44ed` (strip pre-pivot integration) → `7775eea` (variable-length BodyCreate) → `cfbfcf8` (Phase 1.5 KSP integration) → `8f45708` (OrbitDriver kinematic bypass).
+
 ## Context
 
 The current architecture (Featherstone ABA in C# + Unity-PhysX for collision)
