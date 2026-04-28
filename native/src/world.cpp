@@ -153,6 +153,35 @@ LongeronWorld::LongeronWorld(const ::LongeronConfig& cfg)
         static_cast<float>(cfg.gravity_y),
         static_cast<float>(cfg.gravity_z)));
 
+    // Stiff-stack tuning. KSP rockets are long FixedConstraint chains
+    // with high mass ratios (light decouplers between heavy fuel
+    // tanks, radial boosters with long lever arms from the parent's
+    // CoM). Three knobs above the Jolt defaults:
+    //
+    //   mNumVelocitySteps: 10 → 24
+    //   mNumPositionSteps: 2 → 8
+    //     PGS-style solvers propagate constraint correction one link
+    //     per iteration; long chains and high mass ratios need more.
+    //
+    //   mBaumgarte: 0.2 → 0.8
+    //     Default Baumgarte only fixes 20% of position error per
+    //     step. The remaining 80% leaks across ticks, producing
+    //     visible under-damped oscillation — joints "hang and bounce
+    //     as if on weak springs" even though FixedConstraint is
+    //     mathematically rigid. 0.8 fixes 80% per step (≈ critically
+    //     damped); 1.0 would be 100% but tends to overshoot under
+    //     stack imbalance.
+    //
+    // Phase 4 (ABA in reduced coords) makes all three knobs
+    // irrelevant; until then, this is the cheap stiffness fix.
+    {
+        JPH::PhysicsSettings settings = mPhysicsSystem.GetPhysicsSettings();
+        settings.mNumVelocitySteps = 24;
+        settings.mNumPositionSteps = 8;
+        settings.mBaumgarte = 0.8f;
+        mPhysicsSystem.SetPhysicsSettings(settings);
+    }
+
     mContactListener = std::make_unique<ContactListenerImpl>(this);
     mPhysicsSystem.SetContactListener(mContactListener.get());
 
@@ -520,6 +549,62 @@ void LongeronWorld::HandleConstraintDestroy(const uint8_t*& cur, const uint8_t* 
     mConstraintRegistry.erase(it);
 }
 
+void LongeronWorld::HandleMassUpdate(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t user_id = Read<uint32_t>(cur, end);
+    const float    mass    = Read<float>(cur, end);
+
+    if (mass <= 0.0f) return;
+
+    auto it = mBodyRegistry.find(user_id);
+    if (it == mBodyRegistry.end()) return;
+
+    const JPH::BodyLockInterfaceNoLock& lock = mPhysicsSystem.GetBodyLockInterfaceNoLock();
+    JPH::Body* body = lock.TryGetBody(it->second);
+    if (body == nullptr) return;
+
+    JPH::MotionProperties* mp = body->GetMotionProperties();
+    if (mp == nullptr) return;  // static body
+
+    // Recompute mass properties from the shape with the new mass —
+    // this scales the inertia tensor proportionally rather than just
+    // updating inverse mass. Without rescaling inertia, angular
+    // acceleration would stay anchored to the launch-mass tensor and
+    // burns wouldn't visibly change rotational responsiveness.
+    const JPH::Shape* shape = body->GetShape();
+    if (shape == nullptr) return;
+
+    JPH::MassProperties props = shape->GetMassProperties();
+    props.ScaleToMass(mass);
+    mp->SetMassProperties(JPH::EAllowedDOFs::All, props);
+}
+
+void LongeronWorld::HandleSetBodyGroup(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t user_id = Read<uint32_t>(cur, end);
+    const uint32_t group_id = Read<uint32_t>(cur, end);
+
+    auto it = mBodyRegistry.find(user_id);
+    if (it == mBodyRegistry.end()) {
+        JPH::Trace("SetBodyGroup: unknown body %u", user_id);
+        return;
+    }
+
+    // Direct Body* update — runs from the input-parse phase before
+    // PhysicsSystem::Update, so the no-lock interface is safe.
+    const JPH::BodyLockInterfaceNoLock& lock = mPhysicsSystem.GetBodyLockInterfaceNoLock();
+    JPH::Body* body = lock.TryGetBody(it->second);
+    if (body == nullptr) {
+        JPH::Trace("SetBodyGroup: body fetch returned null for user_id %u", user_id);
+        return;
+    }
+
+    if (group_id == 0) {
+        body->SetCollisionGroup(JPH::CollisionGroup(
+            mGroupFilter, JPH::CollisionGroup::cInvalidGroup, 0));
+    } else {
+        body->SetCollisionGroup(JPH::CollisionGroup(mGroupFilter, group_id, 0));
+    }
+}
+
 void LongeronWorld::HandleForceDelta(const uint8_t*& cur, const uint8_t* end) {
     const uint32_t user_id = Read<uint32_t>(cur, end);
     const double fx = Read<double>(cur, end);
@@ -611,6 +696,8 @@ int32_t LongeronWorld::Step(
         case RecordType::ConstraintCreate:  HandleConstraintCreate(cur, end); break;
         case RecordType::ConstraintDestroy: HandleConstraintDestroy(cur, end); break;
         case RecordType::ShiftWorld:        HandleShiftWorld(cur, end); break;
+        case RecordType::SetBodyGroup:      HandleSetBodyGroup(cur, end); break;
+        case RecordType::MassUpdate:        HandleMassUpdate(cur, end); break;
         default:
             // Unknown / unsupported in Phase 1 — abort to avoid mis-
             // parsing the remainder of the stream.

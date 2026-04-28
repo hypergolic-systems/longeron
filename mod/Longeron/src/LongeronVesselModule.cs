@@ -1,10 +1,19 @@
-// Per-vessel lifecycle: register the vessel with SceneRegistry when it
-// goes off-rails, queue BodyCreate records into the bridge for each
-// part, queue BodyDestroy + unregister on go-on-rails.
+// Per-vessel lifecycle hooks. KSP auto-attaches a VesselModule to every
+// Vessel at construction time.
 //
-// VesselModule is auto-attached by KSP to every Vessel; OnStart fires
-// after the vessel is fully constructed but before the first tick.
-// OnGoOffRails fires whenever a packed vessel becomes physics-active.
+// OnGoOffRails: vessel transitions from packed (rails) to physics-active.
+// We just mark it dirty for the reconciler — TopologyReconciler will
+// register the vessel and create bodies/constraints on the next
+// FixedUpdate.
+//
+// OnGoOnRails: vessel transitions from physics-active to packed. We
+// tear down synchronously here because the vessel is leaving physics
+// and we want the bodies gone immediately, not next tick.
+//
+// Mid-flight topology mutations (decouple, couple, dock, joint break)
+// don't go through these hooks — they fire onVesselWasModified /
+// onVesselCreate / onVesselDestroy, which LongeronAddon subscribes to
+// and routes into TopologyReconciler.MarkDirty.
 
 using Longeron.Integration;
 using Longeron.Native;
@@ -30,63 +39,7 @@ namespace Longeron
         {
             if (vessel == null) return;
             if (LongeronAddon.ActiveWorld == null) return;
-            if (SceneRegistry.TryGet(vessel, out _)) return;
-
-            var input = LongeronAddon.ActiveWorld.Input;
-            var managed = SceneRegistry.Register(vessel);
-
-            int created = 0, skipped = 0;
-            foreach (var part in vessel.parts)
-            {
-                if (part == null) continue;
-
-                // Mass in tonnes (KSP's internal convention).
-                float mass = part.mass + part.GetResourceMass();
-                if (mass < 1e-6f) mass = 0.01f;
-
-                var handle = SceneRegistry.MintBodyHandle();
-                bool ok = ColliderWalker.WriteBodyFor(
-                    input, handle, part,
-                    BodyType.Dynamic, Layer.Kinematic, mass,
-                    groupId: managed.GroupId);
-
-                if (ok)
-                {
-                    managed.Add(part, handle);
-                    created++;
-                }
-                else
-                {
-                    skipped++;
-                }
-            }
-
-            // Stop stock physics from doing anything to managed parts'
-            // rigidbodies. Kinematic + no gravity = inert under PhysX.
-            // Driver re-applies these idempotently each tick (the rb
-            // may not exist yet at this point — Vessel.Unpack runs
-            // after OnGoOffRails).
-            ApplyKinematicTakeover(vessel);
-
-            // Phase 2.2: Fixed constraints between every parent-child
-            // pair. Walks the same parts list — bodies were registered
-            // in vessel.parts iteration order so any part's parent has
-            // already been registered (KSP guarantees parent is
-            // earlier in vessel.parts than its children).
-            int constraintsCreated = 0;
-            foreach (var part in vessel.parts)
-            {
-                if (part?.parent == null) continue;
-                if (!managed.TryGetHandle(part, out var childHandle)) continue;
-                if (!managed.TryGetHandle(part.parent, out var parentHandle)) continue;
-
-                uint cid = SceneRegistry.MintConstraintId();
-                input.WriteConstraintCreateFixed(cid, parentHandle, childHandle);
-                managed.AddConstraint(cid);
-                constraintsCreated++;
-            }
-
-            Debug.Log(LogPrefix + $"managing '{vessel.vesselName}': {created} body create(s), {constraintsCreated} fixed-constraint(s) queued, {skipped} skipped");
+            TopologyReconciler.MarkDirty(vessel);
         }
 
         public override void OnGoOnRails()
@@ -117,7 +70,7 @@ namespace Longeron
                 // useGravity = false everywhere anyway.
             }
 
-            Debug.Log(LogPrefix + $"released '{vessel.vesselName}': {managed.BodyHandles.Count} body destroy(s) queued");
+            Debug.Log(LogPrefix + $"released '{vessel.vesselName}': {managed.Bodies.Count} body destroy(s) queued");
         }
 
         public static void ApplyKinematicTakeover(Vessel v)

@@ -33,6 +33,9 @@ namespace Longeron
             GameEvents.onLevelWasLoadedGUIReady.Add(OnLevelLoaded);
             GameEvents.onGameSceneLoadRequested.Add(OnSceneLoadRequested);
             GameEvents.onFloatingOriginShift.Add(OnFloatingOriginShift);
+            GameEvents.onVesselWasModified.Add(OnVesselWasModified);
+            GameEvents.onVesselCreate.Add(OnVesselCreated);
+            GameEvents.onVesselDestroy.Add(OnVesselDestroyed);
 
             gameObject.AddComponent<LongeronSceneDriver>();
         }
@@ -42,8 +45,18 @@ namespace Longeron
             GameEvents.onLevelWasLoadedGUIReady.Remove(OnLevelLoaded);
             GameEvents.onGameSceneLoadRequested.Remove(OnSceneLoadRequested);
             GameEvents.onFloatingOriginShift.Remove(OnFloatingOriginShift);
+            GameEvents.onVesselWasModified.Remove(OnVesselWasModified);
+            GameEvents.onVesselCreate.Remove(OnVesselCreated);
+            GameEvents.onVesselDestroy.Remove(OnVesselDestroyed);
             DisposeWorld();
         }
+
+        // Topology dirty signals. All three funnel into the reconciler;
+        // it decides per-call whether to register, mutate, or tear
+        // down based on the vessel's current state.
+        void OnVesselWasModified(Vessel v) => TopologyReconciler.MarkDirty(v);
+        void OnVesselCreated(Vessel v) => TopologyReconciler.MarkDirty(v);
+        void OnVesselDestroyed(Vessel v) => TopologyReconciler.MarkDirty(v);
 
         // Krakensbane / FloatingOrigin shifted Unity's world origin.
         // Translate every Jolt body by the same delta KSP applied to
@@ -116,6 +129,8 @@ namespace Longeron
                 ActiveWorld = null;
             }
             SceneRegistry.Clear();
+            TopologyReconciler.Clear();
+            JoltBody.ClearPendingDestroys();
         }
     }
 }

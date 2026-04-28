@@ -27,6 +27,8 @@ enum class RecordType : uint8_t {
     SetGravity        = 7,   // double3 gravity
     SetKinematicPose  = 8,   // u32 user_id, double3 pos, float4 rot, float3 lin_vel, float3 ang_vel
     ShiftWorld        = 9,   // double3 delta — translate every body in absolute coords by delta
+    SetBodyGroup      = 10,  // u32 user_id, u32 group_id — change collision filter group post-create
+                             //   (used when a part migrates between vessels via decouple/dock)
 
     // ---- Output records (native → C#) ---------------------------------
     BodyPose          = 64,  // u32 user_id, double3 pos, float4 rot, float3 lin_vel, float3 ang_vel

@@ -234,6 +234,41 @@ without any per-mod special handling. Unity rigidbodies are kinematic so
 the original `AddForce` is a no-op anyway; the Harmony prefix replaces
 it cleanly.
 
+### Resource lifecycle: ECS-style component ownership
+
+Longeron leans on Unity's GameObject/MonoBehaviour ECS to own per-part
+resources rather than tracking them in side dicts that have to be
+manually invalidated.
+
+Concrete pattern: `JoltBody : MonoBehaviour` is attached to every Part
+GameObject we manage. It holds the `BodyHandle` mapping that part to
+its Jolt body, the latest analytic velocity (`LastVelocity`,
+`LastAngularVelocity`), and any other per-part Jolt state we need to
+expose to stock. Two consequences fall out for free:
+
+- **Lookup**: `rb.GetComponent<JoltBody>()` is one Unity-native O(1)
+  probe. No `Dictionary<Rigidbody, BodyHandle>` to keep coherent.
+- **Cleanup**: when a Part is genuinely destroyed (crash damage, splash
+  damage, fairing despawn, scene transition) Unity destroys its
+  GameObject, which destroys its components. `JoltBody.OnDestroy`
+  queues the corresponding `BodyDestroy` onto a static pending list;
+  `TopologyReconciler.Reconcile` drains that list each tick. No
+  periodic sweep, no manual cleanup at every call site that could
+  destroy a part, no leaks if a Part disappears unexpectedly.
+
+Decoupling does not destroy the GameObject — KSP just reassigns the
+part to a new Vessel. The `JoltBody` (and its `BodyHandle`) persists
+across the decouple; the topology reconciler observes the part's new
+`vessel` membership via `GameEvents.onVesselWasModified` /
+`onVesselCreate` and rewires the `(parent, child)` constraint edges.
+Bodies don't need to be torn down and re-created during decouple/dock —
+ownership transfers.
+
+The pattern extends to any other per-part state we want to track
+(joint stub references, per-part contact accumulators, debug
+visualization handles): give it a MonoBehaviour, let `OnDestroy`
+speak for it.
+
 ## PartJoint strategy: kill creation, stub for compatibility
 
 Unity rigidbodies are kinematic; PhysX joints would be no-ops even if
@@ -260,20 +295,46 @@ method is a perfectly reasonable tool.
 
 ## Topology lifecycle
 
-| Event | KSP source | Jolt action | ABA action (Phase 4) |
-|---|---|---|---|
-| Vessel unpacks | `Vessel.GoOffRails` postfix | Create N bodies + N−1 SixDOFConstraints | Build articulated body |
-| Vessel packs | `Vessel.GoOnRails` postfix | Destroy bodies + constraints | Release articulated body |
-| Part coupled | `Part.Couple` postfix | Add bodies + constraints (or merge ObjectLayers if inter-vessel) | Merge subtree |
-| Part decoupled | `Part.decouple` postfix | Remove constraint between the two parts | Split tree |
-| Joint destroyed | `PartJoint.DestroyJoint` postfix | Remove constraint | Potentially split tree |
-| Docking engaged | `ModuleDockingNode` state transitions | Add cross-vessel constraint, merge ObjectLayers | Merge tree (compliant non-tree edge if cycle) |
-| Undocking | `ModuleDockingNode.Undock` | Remove constraint, split ObjectLayer | Split tree (or remove non-tree edge) |
+Mid-flight topology mutations are observed via `GameEvents`, not
+patched per-method. Stock fires `onVesselWasModified(vessel)` after
+every structural change — decouple, couple, undock, joint break,
+ModuleDockingNode engage. `onVesselCreate` covers any vessel born from
+splits. `onVesselDestroy` covers end-of-life.
 
-Topology rebuilds are **deferred to the next FixedUpdate start**, not
-executed synchronously from the event handler. Stock event handlers run
-against the pre-mutation state; Longeron observes the final state at
-the start of the next tick and emits the corresponding mutation records.
+The handlers all funnel into `TopologyReconciler.MarkDirty(vessel)`.
+At the start of the next `FixedUpdate`, the reconciler walks each
+dirty vessel's current part tree and **diffs against our recorded
+state** (`ManagedVessel.Bodies` and `ManagedVessel.ConstraintEdges`),
+emitting the minimal set of bridge mutations to make Jolt match.
+
+Why diff-based reconciliation over per-method Harmony postfixes:
+
+- One subscription set covers every stock and modded mutation path
+  (KSP/KAS/KIS/Breaking Ground/custom decouplers all funnel through
+  `Part.Couple` / `Part.decouple` / `PartJoint.DestroyJoint`, all of
+  which fire `onVesselWasModified`).
+- Idempotent: multiple events on the same vessel within one tick
+  collapse to one diff.
+- Order-independent: `onVesselWasModified(old)` and
+  `onVesselCreate(new)` from a decouple can fire in either order;
+  reconciliation observes final state.
+- No internal-call assumptions about specific stock methods.
+
+| Event | Mechanism | Jolt action | ABA action (Phase 4) |
+|---|---|---|---|
+| Vessel unpacks | `LongeronVesselModule.OnGoOffRails` → MarkDirty | Reconciler creates N bodies + N−1 constraints | Build articulated body |
+| Vessel packs | `LongeronVesselModule.OnGoOnRails` (immediate) | Destroy all bodies + constraints | Release articulated body |
+| Part coupled | `onVesselWasModified` → MarkDirty | Reconciler adds new edges + transfers migrated parts | Merge subtree |
+| Part decoupled | `onVesselWasModified` (old) + `onVesselCreate` (new) → MarkDirty both | Reconciler removes orphaned edges; new vessel claims existing JoltBodies | Split tree |
+| Joint break | We synthesize `Part.decouple` → fires above | Same as decouple | Same as decouple |
+| Docking engaged | `onVesselWasModified` (and `onVesselDestroy` for absorbed vessel) | Reconciler adds cross-vessel edge, transfers parts | Merge tree (compliant non-tree edge if cycle) |
+| Undocking | `onVesselWasModified` (old) + `onVesselCreate` (new) | Same as decouple | Split tree (or remove non-tree edge) |
+| Part destroyed | Unity `OnDestroy` → `JoltBody.OnDestroy` queues `BodyDestroy` | Drained by reconciler next tick | Body removed from articulated tree |
+
+Body destruction lives on the `JoltBody` MonoBehaviour, not the
+reconciler — see "Resource lifecycle" above. Decoupling does NOT
+destroy bodies; ownership transfers to the new ManagedVessel via
+`JoltBody.GetComponent<JoltBody>()` lookup.
 
 ### Loop closures collapse (Phase 4)
 

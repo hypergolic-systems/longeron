@@ -65,6 +65,8 @@ private:
     void HandleConstraintCreate(const uint8_t*& cur, const uint8_t* end);
     void HandleConstraintDestroy(const uint8_t*& cur, const uint8_t* end);
     void HandleShiftWorld(const uint8_t*& cur, const uint8_t* end);
+    void HandleSetBodyGroup(const uint8_t*& cur, const uint8_t* end);
+    void HandleMassUpdate(const uint8_t*& cur, const uint8_t* end);
 
     // -- Output emission ----------------------------------------------
     void EmitBodyPoses();

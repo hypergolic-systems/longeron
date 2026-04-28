@@ -45,6 +45,13 @@ namespace Longeron
             float dt = Time.fixedDeltaTime;
             if (dt <= 0f) return;
 
+            // Topology mutations queued during the prior frame
+            // (decouple, couple, dock, joint break, vessel destroy)
+            // and any pending body destroys from JoltBody.OnDestroy
+            // get reconciled into the bridge first, before per-tick
+            // pose / force records ride the same input buffer.
+            TopologyReconciler.Reconcile(world.Input);
+
             // Spawn the synthetic ground once we have a vessel anchor.
             if (!_groundSpawned)
                 TrySpawnSyntheticGround(world);
@@ -54,6 +61,7 @@ namespace Longeron
             {
                 if (mv.Vessel == null || mv.Vessel.state == Vessel.State.DEAD) continue;
                 LongeronVesselModule.ApplyKinematicTakeover(mv.Vessel);
+                EmitMassUpdates(mv, world.Input);
 
                 // Phase 2.1: gravity comes through FlightIntegrator's
                 // per-body rb.AddForce(integrationAccel·mass) calls,
@@ -86,8 +94,9 @@ namespace Longeron
                 {
                     case RecordType.BodyPose:
                         world.Output.ReadBodyPose(out var pose);
-                        if (SceneRegistry.TryGetPart(pose.Body.Id, out var part) && part?.rb != null)
-                            ApplyPoseToRigidbody(part.rb, pose);
+                        if (JoltBody.TryGet(pose.Body.Id, out var jb)
+                            && jb.Part != null && jb.Part.rb != null)
+                            ApplyPoseToRigidbody(jb.Part.rb, pose);
                         break;
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out _);
@@ -104,6 +113,34 @@ namespace Longeron
             foreach (var mv in SceneRegistry.Vessels)
             {
                 RefreshVesselVelocityFields(mv.Vessel);
+            }
+        }
+
+        // Threshold below which a mass change is too small to be
+        // worth round-tripping through the bridge. 1 g (0.001 kg
+        // = 1e-6 t) — typical engine fuel-burn deltas are
+        // milligrams to grams per tick, so this lets sub-tick
+        // accumulation bunch up before we emit.
+        const float kMassChangeThresholdTonnes = 1e-6f;
+
+        static void EmitMassUpdates(Integration.ManagedVessel mv, Native.InputBuffer input)
+        {
+            foreach (var kv in mv.Bodies)
+            {
+                var part = kv.Key;
+                if (part?.gameObject == null) continue;
+
+                var jb = part.gameObject.GetComponent<JoltBody>();
+                if (jb == null) continue;
+
+                float currentMass = part.mass + part.GetResourceMass();
+                if (currentMass < 1e-6f) currentMass = 0.01f;
+
+                if (System.Math.Abs(currentMass - jb.LastMass) < kMassChangeThresholdTonnes)
+                    continue;
+
+                input.WriteMassUpdate(jb.Handle, currentMass);
+                jb.LastMass = currentMass;
             }
         }
 

@@ -23,6 +23,7 @@ namespace Longeron.Native
         SetKinematicPose  = 8,
 
         ShiftWorld        = 9,
+        SetBodyGroup      = 10,
 
         // Output-only:
         BodyPose          = 64,
@@ -416,6 +417,43 @@ namespace Longeron.Native
             *p++ = (byte)ConstraintKind.Fixed;
             *(uint*)p = bodyA.Id;           p += 4;
             *(uint*)p = bodyB.Id;           p += 4;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Update a body's collision filter group post-creation. Used
+        /// when a part migrates between vessels (decouple, dock) so
+        /// the body's GroupFilterTable membership matches its new
+        /// vessel's group ID. Layout: tag(1) + user_id(4) + group_id(4) = 9.
+        /// </summary>
+        public void WriteSetBodyGroup(BodyHandle body, uint groupId)
+        {
+            const int kSize = 9;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.SetBodyGroup;
+            *(uint*)p = body.Id;            p += 4;
+            *(uint*)p = groupId;            p += 4;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Update a body's mass post-creation. Used to track fuel burn
+        /// and discrete mass changes (fairing eject, decouple of
+        /// physics-significant subparts). Native side rescales the
+        /// shape-derived inertia tensor with the new mass so angular
+        /// dynamics stay correct.
+        /// Layout: tag(1) + user_id(4) + mass(4) = 9 bytes. mass in
+        /// tonnes (KSP convention).
+        /// </summary>
+        public void WriteMassUpdate(BodyHandle body, float mass)
+        {
+            const int kSize = 9;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.MassUpdate;
+            *(uint*)p = body.Id;            p += 4;
+            *(float*)p = mass;              p += 4;
             _len += kSize;
         }
 
