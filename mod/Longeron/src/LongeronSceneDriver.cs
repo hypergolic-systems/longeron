@@ -65,24 +65,9 @@ namespace Longeron
                     world.Input.WriteSetGravity(a.x, a.y, a.z);
                 }
 
-                // SetKinematicPose for each part: mirror the Unity
-                // Transform straight into Jolt. World-frame → Jolt
-                // absolute coords (which match Unity world coords for
-                // Phase 1.5; Krakensbane offset handling is Phase 2).
-                for (int i = 0; i < mv.Parts.Count; i++)
-                {
-                    var part = mv.Parts[i];
-                    if (part == null) continue;
-                    var t = part.transform;
-                    var p = t.position;
-                    var r = t.rotation;
-                    world.Input.WriteSetKinematicPose(
-                        mv.BodyHandles[i],
-                        posX: p.x, posY: p.y, posZ: p.z,
-                        rotX: r.x, rotY: r.y, rotZ: r.z, rotW: r.w,
-                        linX: 0, linY: 0, linZ: 0,
-                        angX: 0, angY: 0, angZ: 0);
-                }
+                // Phase 2.0: Jolt owns pose. Initial position came in
+                // via BodyCreate; Jolt integrates from there each tick
+                // and we read the result back below.
             }
 
             // Step.
@@ -93,18 +78,26 @@ namespace Longeron
                 return;
             }
 
-            // Drain output. For Phase 1.5: count contacts; log first
-            // ContactReport per kLogEveryTicks ticks for sanity check.
+            // Drain output. BodyPose records → write each part's
+            // Unity rigidbody (kinematic, so position/rotation
+            // assignments take effect immediately). ContactReport
+            // records → tally + sample-log.
             int contactCount = 0;
             ContactReportRecord firstContact = default;
             bool haveFirst = false;
+            int posesWritten = 0;
             RecordType type;
             while ((type = world.Output.Next()) != RecordType.None)
             {
                 switch (type)
                 {
                     case RecordType.BodyPose:
-                        world.Output.ReadBodyPose(out _);
+                        world.Output.ReadBodyPose(out var pose);
+                        if (SceneRegistry.TryGetPart(pose.Body.Id, out var part) && part?.rb != null)
+                        {
+                            ApplyPoseToRigidbody(part.rb, pose);
+                            posesWritten++;
+                        }
                         break;
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out var c);
@@ -116,6 +109,8 @@ namespace Longeron
                         break;
                 }
             }
+            // Suppress unused warning until the Phase 2 pose-readback log lands.
+            _ = posesWritten;
 
             if (contactCount > 0 && (_tick % kLogEveryTicks) == 0)
             {
@@ -130,37 +125,72 @@ namespace Longeron
             }
         }
 
+        // Write Jolt's integrated pose + velocity onto the Unity
+        // Rigidbody. With rb.isKinematic = true, position/rotation
+        // assignments take effect on the next physics step (Unity
+        // doesn't try to integrate). Velocity writes feed
+        // vessel.velocityD / orbit-driver via the
+        // OrbitDriverKinematicBypass patch.
+        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose)
+        {
+            rb.position = new Vector3((float)pose.PosX, (float)pose.PosY, (float)pose.PosZ);
+            rb.rotation = new Quaternion(pose.RotX, pose.RotY, pose.RotZ, pose.RotW);
+            rb.velocity = new Vector3(pose.LinX, pose.LinY, pose.LinZ);
+            rb.angularVelocity = new Vector3(pose.AngX, pose.AngY, pose.AngZ);
+        }
+
         // Synthetic launchpad surrogate: a 50 m × 0.5 m × 50 m static
-        // box centred 1 m below the first managed vessel's root part.
+        // box anchored just below the lowest managed part. Picking
+        // "lowest part" rather than "1 m below root" guarantees a
+        // small overlap with the bottom part's collider regardless of
+        // whether the vessel is one part or a tall stack — the smoke
+        // test wants a contact, not a free-fall debugging exercise.
         // Phase 3 replaces this with PQS streaming.
         void TrySpawnSyntheticGround(World world)
         {
-            Vessel anchor = null;
+            float lowestY = float.MaxValue;
+            float anchorX = 0, anchorZ = 0;
+            string anchorName = null;
             foreach (var mv in SceneRegistry.Vessels)
             {
-                if (mv.Vessel != null && mv.Vessel.rootPart != null)
+                if (mv.Vessel == null) continue;
+                foreach (var part in mv.Vessel.parts)
                 {
-                    anchor = mv.Vessel;
-                    break;
+                    if (part?.transform == null) continue;
+                    float py = part.transform.position.y;
+                    if (py < lowestY)
+                    {
+                        lowestY = py;
+                        anchorX = part.transform.position.x;
+                        anchorZ = part.transform.position.z;
+                        anchorName = mv.Vessel.vesselName;
+                    }
                 }
             }
-            if (anchor == null) return;
+            if (anchorName == null) return;
 
-            var root = anchor.rootPart.transform;
-            var p = root.position;
+            // Box halfY = 0.25 m, top face at (centerY + 0.25). Place
+            // top face 0.5 m below the lowest part's transform pivot
+            // — Phase 2.0 has Dynamic bodies that gravity will pull
+            // down onto the ground, so we want clearance for them to
+            // fall through, not overlap.
+            const float kHalfY      = 0.25f;
+            const float kClearance  = 0.5f;
+            float topY = lowestY - kClearance;
+            float centerY = topY - kHalfY;
 
             world.Input.WriteBodyCreateBox(
                 new BodyHandle(SceneRegistry.SyntheticGroundBodyId),
                 BodyType.Static, Layer.Static,
-                halfX: 25f, halfY: 0.25f, halfZ: 25f,
-                posX: p.x, posY: p.y - 1.0, posZ: p.z,
+                halfX: 25f, halfY: kHalfY, halfZ: 25f,
+                posX: anchorX, posY: centerY, posZ: anchorZ,
                 rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
                 mass: 0f);
 
             _groundSpawned = true;
             Debug.Log(LogPrefix + string.Format(
-                "synthetic ground spawned at ({0:F1}, {1:F1}, {2:F1}) — anchor vessel '{3}'",
-                p.x, p.y - 1.0, p.z, anchor.vesselName));
+                "synthetic ground spawned: top@y={0:F2} ({1:F2} m below lowest part) — vessel '{2}'",
+                topY, kClearance, anchorName));
         }
     }
 }

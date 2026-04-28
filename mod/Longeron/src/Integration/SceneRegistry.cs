@@ -20,6 +20,14 @@ namespace Longeron.Integration
         static readonly Dictionary<Vessel, ManagedVessel> _vessels =
             new Dictionary<Vessel, ManagedVessel>();
 
+        // BodyHandle.Id → Part lookup, populated as parts register.
+        // Used by the driver to dispatch per-body output records (BodyPose,
+        // ContactReport) back to the right Unity rigidbody. Ground bodies
+        // and other non-Part-backed handles are absent from this map; the
+        // driver skips them silently.
+        static readonly Dictionary<uint, Part> _bodyToPart =
+            new Dictionary<uint, Part>();
+
         // Reserved range:
         //   1                — first synthetic ground (Phase 1.5)
         //   2..              — vessel parts and any future ground bodies
@@ -49,6 +57,8 @@ namespace Longeron.Integration
         public static bool Unregister(Vessel vessel, out ManagedVessel mv)
         {
             if (!_vessels.TryGetValue(vessel, out mv)) return false;
+            foreach (var h in mv.BodyHandles)
+                _bodyToPart.Remove(h.Id);
             _vessels.Remove(vessel);
             return true;
         }
@@ -56,9 +66,19 @@ namespace Longeron.Integration
         public static bool TryGet(Vessel vessel, out ManagedVessel mv) =>
             _vessels.TryGetValue(vessel, out mv);
 
+        // Called by ManagedVessel.Add to keep _bodyToPart in sync.
+        public static void RegisterBodyHandle(BodyHandle handle, Part part)
+        {
+            _bodyToPart[handle.Id] = part;
+        }
+
+        public static bool TryGetPart(uint bodyId, out Part part) =>
+            _bodyToPart.TryGetValue(bodyId, out part);
+
         public static void Clear()
         {
             _vessels.Clear();
+            _bodyToPart.Clear();
         }
     }
 }

@@ -20,6 +20,7 @@ namespace Longeron.Integration
         {
             Parts.Add(part);
             BodyHandles.Add(handle);
+            SceneRegistry.RegisterBodyHandle(handle, part);
         }
     }
 }
