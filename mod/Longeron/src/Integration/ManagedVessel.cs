@@ -27,6 +27,7 @@ namespace Longeron.Integration
             Parts.Add(part);
             BodyHandles.Add(handle);
             SceneRegistry.RegisterBodyHandle(handle, part);
+            JoltBody.AttachTo(part, handle);
         }
 
         public void AddConstraint(uint constraintId)

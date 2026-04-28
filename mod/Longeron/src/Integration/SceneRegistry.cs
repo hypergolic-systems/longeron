@@ -20,11 +20,17 @@ namespace Longeron.Integration
         static readonly Dictionary<Vessel, ManagedVessel> _vessels =
             new Dictionary<Vessel, ManagedVessel>();
 
-        // BodyHandle.Id → Part lookup, populated as parts register.
-        // Used by the driver to dispatch per-body output records (BodyPose,
-        // ContactReport) back to the right Unity rigidbody. Ground bodies
-        // and other non-Part-backed handles are absent from this map; the
-        // driver skips them silently.
+        // BodyHandle.Id → Part lookup. Used by the driver to dispatch
+        // per-body output records (BodyPose, ContactReport) back to
+        // the right Unity rigidbody. Bodies whose user_id isn't
+        // backed by a Part (synthetic ground, future static geometry)
+        // are absent — the driver skips them silently.
+        //
+        // Forward lookups (rb → BodyHandle, part → BodyHandle) go
+        // through a `JoltBody` MonoBehaviour attached to the part's
+        // GameObject — see Longeron.JoltBody. Lifetime is tied to
+        // the GameObject, so no manual cleanup on part death is
+        // needed.
         static readonly Dictionary<uint, Part> _bodyToPart =
             new Dictionary<uint, Part>();
 
