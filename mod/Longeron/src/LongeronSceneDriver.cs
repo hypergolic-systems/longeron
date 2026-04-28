@@ -179,35 +179,32 @@ namespace Longeron
             if (v.rootPart == null || v.rootPart.rb == null) return;
             if (v.orbit == null || v.mainBody == null) return;
 
-            // Per VesselPrecalculate.cs:540-560, velocityD is the
-            // mass-weighted sum of part.rb.velocity over all parts +
-            // FrameVelocity. For Phase 2.x with one rb per part,
-            // approximate by using the root rb's velocity at the CoM
-            // as a stand-in for the weighted average — same value for
-            // a rigid stack.
-            Vector3 rbVelAtCoM = v.rootPart.rb.GetPointVelocity(v.CoMD);
-            v.rb_velocity = rbVelAtCoM;
-            v.rb_velocityD = rbVelAtCoM;
-            v.velocityD = (Vector3d)rbVelAtCoM + Krakensbane.GetFrameVelocity();
+            // rb.velocity directly (NOT GetPointVelocity — that
+            // returns 0 for kinematic rbs in Unity, despite us
+            // writing rb.velocity each tick from Jolt's pose
+            // readback).
+            //
+            // We integrate in the rotating frame (Krakensbane keeps
+            // Unity world rotating with the surface), so rb.velocity
+            // IS the surface-frame velocity. velocityD = rb.velocity +
+            // FrameVelocity (Krakensbane's drained inertial component
+            // — non-zero only at high speeds). Inertial-frame velocity
+            // = velocityD + body's surface rotation at our position.
+            Vector3d rbVel = (Vector3d)v.rootPart.rb.velocity;
+            v.rb_velocity = (Vector3)rbVel;
+            v.rb_velocityD = rbVel;
+            v.velocityD = rbVel + Krakensbane.GetFrameVelocity();
 
-            // Vessel.cs:3530-3556 — derive srf_velocity, obt_velocity,
-            // and the speed scalars. We do NOT re-run UpdateOrbit
-            // here: that calls TrackRigidbody, which reads vessel.CoMD
-            // and has side effects that visibly froze the root part.
-            // Compute srf_velocity directly from the freshly written
-            // velocityD instead, leaving orbit refreshing on stock's
-            // existing path (one-tick lag is acceptable for the orbit
-            // display; the navball reads srf_velocity which we now
-            // compute from current state).
-            v.srf_velocity = v.velocityD - v.mainBody.getRFrmVelOrbit(v.orbit);
-            // obt_velocity = velocityD relative to referenceBody's frame.
-            // Stock uses orbit.GetRelativeVel which is set by TrackRigidbody;
-            // for our purposes velocityD - referenceBody frame velocity
-            // is a good direct approximation.
-            v.obt_velocity = v.velocityD;
+            // srf_velocity = velocityD itself (rotating-frame motion).
+            // obt_velocity = inertial-frame velocity = surface motion +
+            // body's surface rotation at our position.
+            // Both formulas via Kraken (~/dev/hgs2/mod/KrakenClient.cs:368).
+            Vector3d rotVelAtCoM = v.mainBody.getRFrmVel(v.CoMD);
+            v.srf_velocity = v.velocityD;
+            v.obt_velocity = v.velocityD + rotVelAtCoM;
             v.obt_speed = v.obt_velocity.magnitude;
-            v.upAxis = FlightGlobals.getUpAxis(v.mainBody, v.CoMD);
-            v.verticalSpeed = Vector3d.Dot(v.obt_velocity, v.upAxis);
+            v.upAxis = (v.CoMD - v.mainBody.position).normalized;
+            v.verticalSpeed = Vector3d.Dot(v.srf_velocity, v.upAxis);
             double sqrMag = v.srf_velocity.sqrMagnitude;
             if (sqrMag > 0.0)
             {
