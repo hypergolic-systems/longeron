@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Longeron.Native.Probe — standalone console verification harness for
+    the C++ bridge. Runs via `mono` (or `dotnet run`) on the host
+    platform; not part of the KSP plugin.
+
+    Why a console app instead of an MSTest project: VSTest's net48
+    testhost crashes on macOS arm64 when loading our universal
+    longeron_native.dylib (likely a Rosetta/arch mismatch in the
+    testhost spawn). A bare console app run via mono has no such
+    plumbing and is what we actually need for the load-bearing Phase 1
+    verification — does the kinematic-vs-static contact callback fire
+    in Jolt? Bake the assertions into Main() and exit non-zero on
+    failure.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Longeron.Native.Probe</RootNamespace>
+    <AssemblyName>Longeron.Native.Probe</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath>build/</OutputPath>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Longeron.Native\Longeron.Native.csproj" />
+  </ItemGroup>
+
+  <!-- Copy the host-platform native lib next to the executable so
+       [DllImport("longeron_native")] resolves at probe runtime.
+       Mono on Unix prepends `lib`; CMake matches that convention. -->
+  <Target Name="CopyNativeBridge" AfterTargets="Build">
+    <ItemGroup>
+      <NativeBridgeLib Include="$(MSBuildThisFileDirectory)..\..\native\build\longeron_native.dll" />
+      <NativeBridgeLib Include="$(MSBuildThisFileDirectory)..\..\native\build\liblongeron_native.dylib" />
+      <NativeBridgeLib Include="$(MSBuildThisFileDirectory)..\..\native\build\liblongeron_native.so" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeBridgeLib)"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('%(NativeBridgeLib.FullPath)')" />
+  </Target>
+
+</Project>

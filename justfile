@@ -23,8 +23,8 @@ native-version: native-build
     #!/usr/bin/env bash
     set -euo pipefail
     case "$(uname)" in
-        Darwin) lib=native/build/longeron_native.dylib ;;
-        Linux)  lib=native/build/longeron_native.so ;;
+        Darwin) lib=native/build/liblongeron_native.dylib ;;
+        Linux)  lib=native/build/liblongeron_native.so ;;
         *)      lib=native/build/longeron_native.dll ;;
     esac
     if [ ! -f "$lib" ]; then
@@ -40,6 +40,12 @@ mod-build config="Release":
 
 mod-test:
     cd mod && dotnet test Longeron.Physics.Tests/Longeron.Physics.Tests.csproj
+
+# Run the native bridge probe (Phase 1 verification: kinematic-vs-static
+# contact callbacks fire). Goes through `mono` because dotnet's net48
+# testhost is unstable on macOS arm64 with custom native libs.
+native-probe: native-build (mod-build "Release")
+    cd mod/Longeron.Native.Probe/build && mono Longeron.Native.Probe.exe
 
 mod-clean:
     cd mod && dotnet clean
@@ -62,9 +68,9 @@ dist: (mod-build "Release") native-build
     cp mod/Longeron.Native/build/Longeron.Native.dll    "$root/Plugins/"
 
     case "$(uname)" in
-        Darwin) cp native/build/longeron_native.dylib "$root/Plugins/" ;;
-        Linux)  cp native/build/longeron_native.so    "$root/Plugins/" ;;
-        *)      cp native/build/longeron_native.dll   "$root/Plugins/" ;;
+        Darwin) cp native/build/liblongeron_native.dylib "$root/Plugins/" ;;
+        Linux)  cp native/build/liblongeron_native.so    "$root/Plugins/" ;;
+        *)      cp native/build/longeron_native.dll      "$root/Plugins/" ;;
     esac
 
     cp LICENSE "$root/"

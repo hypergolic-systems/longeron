@@ -48,6 +48,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/JoltPhysics/Build/CMakeLists.
     # physics side doesn't need to track Krakensbane shifts.
     set(DOUBLE_PRECISION                  ON  CACHE BOOL "" FORCE)
     set(GENERATE_DEBUG_SYMBOLS            ON  CACHE BOOL "" FORCE)
+    set(ENABLE_ASSERTS                    ON  CACHE BOOL "" FORCE)
     set(USE_AVX2                          OFF CACHE BOOL "" FORCE)
     set(USE_AVX                           OFF CACHE BOOL "" FORCE)
     set(USE_SSE4_2                        OFF CACHE BOOL "" FORCE)
@@ -72,6 +73,8 @@ endif()
 
 add_library(longeron_native SHARED
     src/bridge.cpp
+    src/world.cpp
+    src/contact_listener.cpp
 )
 
 target_include_directories(longeron_native PRIVATE src)
@@ -93,12 +96,11 @@ set_target_properties(longeron_native PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-# Strip the lib prefix on Unix so the artifact is `longeron_native.so`
-# / `longeron_native.dylib`, matching the C# DllImport name on all
-# platforms.
-if(UNIX)
-    set_target_properties(longeron_native PROPERTIES PREFIX "")
-endif()
+# Keep CMake's default platform conventions: longeron_native.dll on
+# Windows, liblongeron_native.{dylib,so} on Unix. Mono's DllImport
+# resolver automatically prepends `lib` on Unix when looking up
+# `[DllImport("longeron_native")]`, so this is the form it actually
+# searches for.
 
 # Warnings.
 if(MSVC)
