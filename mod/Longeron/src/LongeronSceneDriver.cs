@@ -27,7 +27,6 @@ namespace Longeron
     {
         const string LogPrefix = "[Longeron/driver] ";
 
-        long _tick;
         bool _groundSpawned;
 
         // Called by LongeronAddon when a new flight-scene world is
@@ -37,18 +36,12 @@ namespace Longeron
             _groundSpawned = false;
         }
 
-        // Contact-log throttle: log at most kLogEveryTicks ticks worth
-        // of contacts in detail; otherwise emit a one-line summary
-        // each tick. KSP's FixedUpdate is 50 Hz, so 50 → ~1s.
-        const int kLogEveryTicks = 50;
-
         public void FixedUpdate()
         {
             var world = LongeronAddon.ActiveWorld;
             if (world == null) return;
             if (!HighLogic.LoadedSceneIsFlight) return;
 
-            _tick++;
             float dt = Time.fixedDeltaTime;
             if (dt <= 0f) return;
 
@@ -68,17 +61,6 @@ namespace Longeron
                 // redirect into per-tick ForceDelta records. Jolt's
                 // global gravity stays at zero — applying it here
                 // would double-count.
-                if (mv.Vessel == FlightGlobals.ActiveVessel
-                    && mv.Vessel.rootPart != null
-                    && (_tick % kLogEveryTicks) == 0)
-                {
-                    var fv = Krakensbane.GetFrameVelocity();
-                    var rootPos = mv.Vessel.rootPart.transform.position;
-                    Debug.Log(LogPrefix + string.Format(
-                        "tick={0} fv=({1:F2},{2:F2},{3:F2}) rootPos=({4:F2},{5:F2},{6:F2})",
-                        _tick, fv.x, fv.y, fv.z,
-                        rootPos.x, rootPos.y, rootPos.z));
-                }
 
                 // Phase 2.0: Jolt owns pose. Initial position came in
                 // via BodyCreate; Jolt integrates from there each tick
@@ -94,13 +76,9 @@ namespace Longeron
             }
 
             // Drain output. BodyPose records → write each part's
-            // Unity rigidbody (kinematic, so position/rotation
-            // assignments take effect immediately). ContactReport
-            // records → tally + sample-log.
-            int contactCount = 0;
-            ContactReportRecord firstContact = default;
-            bool haveFirst = false;
-            int posesWritten = 0;
+            // Unity rigidbody. ContactReport records are read but not
+            // currently consumed downstream — Phase 4 will wire them
+            // into ABA's external-wrench input.
             RecordType type;
             while ((type = world.Output.Next()) != RecordType.None)
             {
@@ -109,101 +87,58 @@ namespace Longeron
                     case RecordType.BodyPose:
                         world.Output.ReadBodyPose(out var pose);
                         if (SceneRegistry.TryGetPart(pose.Body.Id, out var part) && part?.rb != null)
-                        {
-                            var jb = part.gameObject != null
-                                       ? part.gameObject.GetComponent<JoltBody>()
-                                       : null;
-                            ApplyPoseToRigidbody(part.rb, pose, jb);
-                            posesWritten++;
-                        }
+                            ApplyPoseToRigidbody(part.rb, pose);
                         break;
                     case RecordType.ContactReport:
-                        world.Output.ReadContactReport(out var c);
-                        contactCount++;
-                        if (!haveFirst) { firstContact = c; haveFirst = true; }
+                        world.Output.ReadContactReport(out _);
                         break;
                     default:
                         Debug.LogWarning(LogPrefix + "unexpected output record type " + type);
                         break;
                 }
             }
-            // Suppress unused warning until the Phase 2 pose-readback log lands.
-            _ = posesWritten;
 
-            // After pose readback, rb.velocity is current — refresh
-            // each managed vessel's derived velocity fields so the
-            // navball / SAS / aero / orbit displays read correct
-            // values this same tick.
+            // After pose readback, refresh each managed vessel's
+            // derived velocity fields so the navball / SAS / aero /
+            // orbit displays read correct values this same tick.
             foreach (var mv in SceneRegistry.Vessels)
             {
                 RefreshVesselVelocityFields(mv.Vessel);
             }
-
-            if (contactCount > 0 && (_tick % kLogEveryTicks) == 0)
-            {
-                Debug.Log(LogPrefix + string.Format(
-                    "tick={0} contacts={1} sample: a={2} b={3} pt=({4:F2},{5:F2},{6:F2}) " +
-                    "n=({7:F2},{8:F2},{9:F2}) depth={10:F4}",
-                    _tick, contactCount,
-                    firstContact.BodyA.Id, firstContact.BodyB.Id,
-                    firstContact.PointX, firstContact.PointY, firstContact.PointZ,
-                    firstContact.NormalX, firstContact.NormalY, firstContact.NormalZ,
-                    firstContact.Depth));
-            }
         }
 
-        // Write Jolt's integrated pose + velocity onto the Unity
-        // Rigidbody. With rb.isKinematic = true, position/rotation
-        // assignments take effect on the next physics step (Unity
-        // doesn't try to integrate). Velocity writes feed
-        // vessel.velocityD / orbit-driver via the
-        // OrbitDriverKinematicBypass patch.
-        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose, JoltBody jb)
+        // Apply Jolt's integrated pose + velocity to a Unity Rigidbody.
+        //
+        // Velocity convention: Jolt integrates in absolute world coords
+        // (V_abs). Stock KSP expects rb.velocity to be the
+        // *Krakensbane-adjusted* velocity (V_abs − FrameVel), so that
+        // velocityD = rb.velocity + FrameVel = V_abs round-trips. We
+        // subtract FrameVel here.
+        //
+        // Why this matters: if we wrote V_abs into rb.velocity, then on
+        // every tick where speed > MaxV, Krakensbane would drain
+        // rb_velocityD (= V_abs) into FrameVel, but Jolt has no notion
+        // of FrameVel and would re-emit V_abs next tick — FrameVel
+        // grows by V_abs every tick → runaway acceleration → vessel
+        // explodes from thermal damage. Subtracting FrameVel here makes
+        // Krakensbane's drain idempotent: at steady state rb.velocity
+        // ≈ 0, FrameVel holds the orbital velocity, no further excess.
+        //
+        // The setter goes through Patch_Rigidbody_SetVelocity into
+        // JoltBody.LastVelocity, so subsequent stock reads return the
+        // adjusted velocity too. JoltBody.LastVelocity here stores
+        // *adjusted*, not absolute — RefreshVesselVelocityFields adds
+        // FrameVel back when computing velocityD.
+        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose)
         {
+            Vector3 frameVel = Krakensbane.GetFrameVelocityV3f();
+            Vector3 vAbs = new Vector3(pose.LinX, pose.LinY, pose.LinZ);
             rb.position = new Vector3((float)pose.PosX, (float)pose.PosY, (float)pose.PosZ);
             rb.rotation = new Quaternion(pose.RotX, pose.RotY, pose.RotZ, pose.RotW);
-
-            // Unity silently drops rb.velocity / rb.angularVelocity
-            // writes on kinematic rigidbodies. Stash the analytic
-            // Jolt velocity on the JoltBody component instead — our
-            // refresh path and any reader-patches read from there.
-            var vel = new Vector3(pose.LinX, pose.LinY, pose.LinZ);
-            var angVel = new Vector3(pose.AngX, pose.AngY, pose.AngZ);
-            if (jb != null)
-            {
-                jb.LastVelocity = vel;
-                jb.LastAngularVelocity = angVel;
-            }
-            // Try the rb.velocity write anyway — for non-kinematic rbs
-            // (e.g., if a future Phase moves to dynamic rbs) this is
-            // the right thing; for kinematic, it's a silent no-op.
-            rb.velocity = vel;
-            rb.angularVelocity = angVel;
+            rb.velocity = vAbs - frameVel;
+            rb.angularVelocity = new Vector3(pose.AngX, pose.AngY, pose.AngZ);
         }
 
-        // Diagnostic: instance-level so we can throttle a per-second log
-        // without spamming.
-        static long _diagTick;
-        public static void DiagPostfixVelocity(Vessel v)
-        {
-            _diagTick++;
-            if ((_diagTick % 50) != 0) return;
-            if (v?.rootPart?.rb == null) return;
-            var rb = v.rootPart.rb;
-            Debug.Log(string.Format(
-                "[Longeron/diag-vel] v={0} rb.vel=({1:F3},{2:F3},{3:F3}) " +
-                "isKin={4} velD=({5:F2},{6:F2},{7:F2}) srf=({8:F2},{9:F2},{10:F2}) " +
-                "srfSpeed={11:F2} obtSpeed={12:F2} fv=({13:F2},{14:F2},{15:F2})",
-                v.vesselName,
-                rb.velocity.x, rb.velocity.y, rb.velocity.z,
-                rb.isKinematic,
-                v.velocityD.x, v.velocityD.y, v.velocityD.z,
-                v.srf_velocity.x, v.srf_velocity.y, v.srf_velocity.z,
-                v.srfSpeed, v.obt_speed,
-                Krakensbane.GetFrameVelocity().x,
-                Krakensbane.GetFrameVelocity().y,
-                Krakensbane.GetFrameVelocity().z));
-        }
 
         // Refresh vessel-level derived velocity fields from rb state
         // after pose readback. Stock VesselPrecalculate.CalculatePhysicsStats
@@ -221,24 +156,19 @@ namespace Longeron
             if (v.rootPart == null || v.rootPart.rb == null) return;
             if (v.orbit == null || v.mainBody == null) return;
 
-            // Source the velocity from JoltBody.LastVelocity — Unity
-            // discards rb.velocity writes on kinematic rbs, so reading
-            // rb.velocity directly always gives 0. JoltBody stashed
-            // the analytic Jolt velocity at pose readback time.
-            //
-            // Jolt integrates in the rotating frame (Krakensbane
-            // keeps Unity world rotating with the surface), so this
-            // is surface-frame velocity. velocityD = rotating-frame
-            // velocity + Krakensbane.FrameVelocity (the inertial
-            // component drained at high speeds). Inertial-frame
-            // velocity = velocityD + body's surface rotation at our
-            // position.
-            var rootJb = v.rootPart.gameObject != null
-                            ? v.rootPart.gameObject.GetComponent<JoltBody>()
-                            : null;
+            // Read velocity from JoltBody directly rather than through
+            // rb.velocity. Why: Harmony postfixes on Unity's
+            // extern Rigidbody.get_velocity property aren't always
+            // honored under Mono, so rb.velocity may still return 0 for
+            // kinematic bodies. JoltBody.LastVelocity is what we wrote
+            // in ApplyPoseToRigidbody — it's the Krakensbane-adjusted
+            // velocity (V_abs − FrameVel). velocityD = adjusted +
+            // FrameVel = V_abs round-trips back to absolute.
+            var rootRb = v.rootPart.rb;
+            var rootJb = rootRb.GetComponent<JoltBody>();
             Vector3d rbVel = rootJb != null
-                              ? (Vector3d)rootJb.LastVelocity
-                              : (Vector3d)v.rootPart.rb.velocity;
+                ? (Vector3d)rootJb.LastVelocity
+                : (Vector3d)rootRb.velocity;
             v.rb_velocity = (Vector3)rbVel;
             v.rb_velocityD = rbVel;
             v.velocityD = rbVel + Krakensbane.GetFrameVelocity();
@@ -270,9 +200,13 @@ namespace Longeron
             }
 
             // Angular velocity in vessel-local frame (matches
-            // VesselPrecalculate:645).
+            // VesselPrecalculate:645). Same JoltBody-direct approach as
+            // linear velocity above.
+            Vector3 rootAngV = rootJb != null
+                ? rootJb.LastAngularVelocity
+                : rootRb.angularVelocity;
             v.angularVelocity = Quaternion.Inverse(v.ReferenceTransform.rotation)
-                              * v.rootPart.rb.angularVelocity;
+                              * rootAngV;
             v.angularVelocityD = v.angularVelocity;
         }
 
