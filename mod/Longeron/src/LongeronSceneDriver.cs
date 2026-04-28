@@ -188,19 +188,22 @@ namespace Longeron
             v.rb_velocityD = rbVelAtCoM;
             v.velocityD = (Vector3d)rbVelAtCoM + Krakensbane.GetFrameVelocity();
 
-            // Re-run UpdateOrbit so TrackRigidbody picks up the fresh
-            // velocityD we just wrote (the order-0 invocation read a
-            // stale value from last tick's pose readback). Our
-            // OrbitDriverKinematicBypass patch un-kinematics for the
-            // duration so the kinematic-rb early-return doesn't skip
-            // the velocity refresh inside TrackRigidbody.
-            if (v.orbitDriver != null) v.orbitDriver.UpdateOrbit(offset: false);
-
             // Vessel.cs:3530-3556 — derive srf_velocity, obt_velocity,
-            // and the speed scalars from the now-fresh orbit state.
-            v.obt_velocity = v.orbit.GetRelativeVel();
+            // and the speed scalars. We do NOT re-run UpdateOrbit
+            // here: that calls TrackRigidbody, which reads vessel.CoMD
+            // and has side effects that visibly froze the root part.
+            // Compute srf_velocity directly from the freshly written
+            // velocityD instead, leaving orbit refreshing on stock's
+            // existing path (one-tick lag is acceptable for the orbit
+            // display; the navball reads srf_velocity which we now
+            // compute from current state).
+            v.srf_velocity = v.velocityD - v.mainBody.getRFrmVelOrbit(v.orbit);
+            // obt_velocity = velocityD relative to referenceBody's frame.
+            // Stock uses orbit.GetRelativeVel which is set by TrackRigidbody;
+            // for our purposes velocityD - referenceBody frame velocity
+            // is a good direct approximation.
+            v.obt_velocity = v.velocityD;
             v.obt_speed = v.obt_velocity.magnitude;
-            v.srf_velocity = v.orbit.GetVel() - v.mainBody.getRFrmVelOrbit(v.orbit);
             v.upAxis = FlightGlobals.getUpAxis(v.mainBody, v.CoMD);
             v.verticalSpeed = Vector3d.Dot(v.obt_velocity, v.upAxis);
             double sqrMag = v.srf_velocity.sqrMagnitude;
