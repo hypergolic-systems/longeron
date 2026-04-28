@@ -55,14 +55,28 @@ namespace Longeron
                 if (mv.Vessel == null || mv.Vessel.state == Vessel.State.DEAD) continue;
                 LongeronVesselModule.ApplyKinematicTakeover(mv.Vessel);
 
-                // Gravity (Jolt's global gravity, set per-tick from
-                // active vessel's integrationAccel — Phase 4 may make
-                // this per-body for multi-planet scenes).
-                if (mv.Vessel == FlightGlobals.ActiveVessel
-                    && mv.Vessel.precalc != null)
+                // Gravity: use FlightGlobals.getGeeForceAtPosition for
+                // a clean gravity-only vector at the vessel's CoM.
+                // Pure gravity (no rotating-frame fictitious forces).
+                // Phase 2.0 sets Jolt's global gravity once per tick;
+                // Phase 4 will make this per-body for multi-planet
+                // scenes via per-tick ForceDelta records.
+                if (mv.Vessel == FlightGlobals.ActiveVessel && mv.Vessel.rootPart != null)
                 {
-                    var a = mv.Vessel.precalc.integrationAccel;
-                    world.Input.WriteSetGravity(a.x, a.y, a.z);
+                    Vector3d g = FlightGlobals.getGeeForceAtPosition(mv.Vessel.rootPart.transform.position);
+                    world.Input.WriteSetGravity(g.x, g.y, g.z);
+
+                    if ((_tick % kLogEveryTicks) == 0)
+                    {
+                        var fv = Krakensbane.GetFrameVelocity();
+                        var rootPos = mv.Vessel.rootPart.transform.position;
+                        Debug.Log(LogPrefix + string.Format(
+                            "tick={0} grav=({1:F3},{2:F3},{3:F3}) |g|={4:F2} fv=({5:F2},{6:F2},{7:F2}) rootPos=({8:F2},{9:F2},{10:F2})",
+                            _tick,
+                            g.x, g.y, g.z, g.magnitude,
+                            fv.x, fv.y, fv.z,
+                            rootPos.x, rootPos.y, rootPos.z));
+                    }
                 }
 
                 // Phase 2.0: Jolt owns pose. Initial position came in
@@ -140,57 +154,84 @@ namespace Longeron
         }
 
         // Synthetic launchpad surrogate: a 50 m × 0.5 m × 50 m static
-        // box anchored just below the lowest managed part. Picking
-        // "lowest part" rather than "1 m below root" guarantees a
-        // small overlap with the bottom part's collider regardless of
-        // whether the vessel is one part or a tall stack — the smoke
-        // test wants a contact, not a free-fall debugging exercise.
+        // box oriented perpendicular to gravity, placed just below
+        // the lowest part along the gravity direction. KSP's flight
+        // scene doesn't reorient the world to put +Y as "up" — Unity
+        // axes are absolute Kerbin-centric coords. So we anchor
+        // everything in the gravity vector, not Unity Y.
+        //
         // Phase 3 replaces this with PQS streaming.
         void TrySpawnSyntheticGround(World world)
         {
-            float lowestY = float.MaxValue;
-            float anchorX = 0, anchorZ = 0;
-            string anchorName = null;
+            // Pick the active vessel (or the first registered) as the
+            // gravity reference point — gravity varies with position,
+            // but for a single launchpad vessel this is a constant.
+            Vessel anchorVessel = null;
+            foreach (var mv in SceneRegistry.Vessels)
+            {
+                if (mv.Vessel != null && mv.Vessel.rootPart != null)
+                {
+                    anchorVessel = mv.Vessel;
+                    break;
+                }
+            }
+            if (anchorVessel == null) return;
+
+            Vector3 rootPos = anchorVessel.rootPart.transform.position;
+            Vector3d gd = FlightGlobals.getGeeForceAtPosition(rootPos);
+            Vector3 g = new Vector3((float)gd.x, (float)gd.y, (float)gd.z);
+            float gMag = g.magnitude;
+            if (gMag < 1e-3f)
+            {
+                Debug.LogWarning(LogPrefix + "no gravity at vessel position — skipping synthetic ground");
+                return;
+            }
+            Vector3 gDir = g / gMag;          // points "down"
+            Vector3 upDir = -gDir;            // points "up"
+
+            // Find the part farthest along -gDir (the deepest part).
+            // Project each part's offset from rootPos onto -gDir and
+            // pick the smallest projection — that's the lowest along
+            // the gravity axis.
+            float lowestProj = 0f;
             foreach (var mv in SceneRegistry.Vessels)
             {
                 if (mv.Vessel == null) continue;
                 foreach (var part in mv.Vessel.parts)
                 {
                     if (part?.transform == null) continue;
-                    float py = part.transform.position.y;
-                    if (py < lowestY)
-                    {
-                        lowestY = py;
-                        anchorX = part.transform.position.x;
-                        anchorZ = part.transform.position.z;
-                        anchorName = mv.Vessel.vesselName;
-                    }
+                    Vector3 offset = part.transform.position - rootPos;
+                    float proj = Vector3.Dot(offset, upDir);
+                    if (proj < lowestProj) lowestProj = proj;
                 }
             }
-            if (anchorName == null) return;
 
-            // Box halfY = 0.25 m, top face at (centerY + 0.25). Place
-            // top face 0.5 m below the lowest part's transform pivot
-            // — Phase 2.0 has Dynamic bodies that gravity will pull
-            // down onto the ground, so we want clearance for them to
-            // fall through, not overlap.
-            const float kHalfY      = 0.25f;
-            const float kClearance  = 0.5f;
-            float topY = lowestY - kClearance;
-            float centerY = topY - kHalfY;
+            // Ground top face sits 0.5 m below the lowest part along
+            // the gravity axis. Box halfY = 0.25 m, so center is
+            // halfY further down.
+            const float kHalfY     = 0.25f;
+            const float kClearance = 0.5f;
+            Vector3 lowestPos = rootPos + upDir * lowestProj;
+            Vector3 groundCenter = lowestPos + gDir * (kClearance + kHalfY);
+
+            // Rotation that maps the box's natural up (+Y_local) to
+            // the world's gravity-up direction.
+            Quaternion groundRot = Quaternion.FromToRotation(Vector3.up, upDir);
 
             world.Input.WriteBodyCreateBox(
                 new BodyHandle(SceneRegistry.SyntheticGroundBodyId),
                 BodyType.Static, Layer.Static,
                 halfX: 25f, halfY: kHalfY, halfZ: 25f,
-                posX: anchorX, posY: centerY, posZ: anchorZ,
-                rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                posX: groundCenter.x, posY: groundCenter.y, posZ: groundCenter.z,
+                rotX: groundRot.x, rotY: groundRot.y, rotZ: groundRot.z, rotW: groundRot.w,
                 mass: 0f);
 
             _groundSpawned = true;
             Debug.Log(LogPrefix + string.Format(
-                "synthetic ground spawned: top@y={0:F2} ({1:F2} m below lowest part) — vessel '{2}'",
-                topY, kClearance, anchorName));
+                "synthetic ground spawned: center=({0:F2},{1:F2},{2:F2}) up=({3:F2},{4:F2},{5:F2}) — vessel '{6}'",
+                groundCenter.x, groundCenter.y, groundCenter.z,
+                upDir.x, upDir.y, upDir.z,
+                anchorVessel.vesselName));
         }
     }
 }
