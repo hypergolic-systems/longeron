@@ -7,15 +7,16 @@ top of Jolt to model joint compliance — eliminating the wobble of stock
 KSP without losing the structural flex Squad's joint model intentionally
 provides.
 
-> **Status: work in progress.** Longeron is mid-pivot. The original
-> articulated-body solver runs against PhysX-driven contact handoff in
-> earlier branches, but that approach is being replaced with a native
-> Jolt bridge after both kinematic and non-kinematic configurations
-> hit the same fundamental wall: Unity won't share rigidbody state
-> cleanly with PhysX. See [`CLAUDE.md`](CLAUDE.md) for the architecture
-> and `/Users/alx/.claude/plans/splendid-dancing-flute.md` for the
-> phased build plan. Don't fly your career save with it. Save first;
-> expect crashes, NaN'd vessels, and stranded Kerbals.
+> **Status: work in progress.** The Jolt-bridge pivot is underway.
+> Phase 0 (native bridge scaffold), Phase 1 (kinematic contact-callback
+> verification, all twelve probe checks green out-of-game), and
+> Phase 1.5 (in-game smoke test: real collider mirroring, one-part
+> vessel managed with kinematic-vs-static contacts firing every tick
+> on the launchpad) all reached on `main`. Phase 2 — force redirect,
+> mass updates, pose readback Jolt → Unity, multi-part joints — is
+> next. Don't fly your career save with it. Save first; expect
+> crashes, NaN'd vessels, and stranded Kerbals. See [`CLAUDE.md`](CLAUDE.md)
+> for architecture and [`PLAN.md`](PLAN.md) for the phased build plan.
 
 The name is the [aerospace structural member](https://en.wikipedia.org/wiki/Longeron)
 that runs the length of a fuselage and keeps it rigid. That is approximately
