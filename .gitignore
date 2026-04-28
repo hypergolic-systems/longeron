@@ -3,6 +3,9 @@ mod/**/build/
 mod/**/bin/
 mod/**/obj/
 
+# C++ / CMake (native bridge)
+native/build/
+
 # macOS
 .DS_Store
 

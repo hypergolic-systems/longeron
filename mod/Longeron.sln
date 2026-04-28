@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Longeron.Physics", "Longero
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Longeron.Physics.Tests", "Longeron.Physics.Tests\Longeron.Physics.Tests.csproj", "{B2C3D4E5-0001-0001-0001-000000000003}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Longeron.Native", "Longeron.Native\Longeron.Native.csproj", "{B2C3D4E5-0001-0001-0001-000000000004}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{B2C3D4E5-0001-0001-0001-000000000003}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B2C3D4E5-0001-0001-0001-000000000003}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B2C3D4E5-0001-0001-0001-000000000003}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B2C3D4E5-0001-0001-0001-000000000004}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2C3D4E5-0001-0001-0001-000000000004}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2C3D4E5-0001-0001-0001-000000000004}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2C3D4E5-0001-0001-0001-000000000004}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
