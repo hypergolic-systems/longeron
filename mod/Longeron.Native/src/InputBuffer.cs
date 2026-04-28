@@ -22,6 +22,8 @@ namespace Longeron.Native
         SetGravity        = 7,
         SetKinematicPose  = 8,
 
+        ShiftWorld        = 9,
+
         // Output-only:
         BodyPose          = 64,
         ContactReport     = 65,
@@ -368,6 +370,25 @@ namespace Longeron.Native
             *(double*)p = gx;               p += 8;
             *(double*)p = gy;               p += 8;
             *(double*)p = gz;               p += 8;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Translate every body in the world by the given delta in
+        /// absolute coordinates. Used to keep Jolt's world aligned
+        /// with Unity's view when KSP's Krakensbane / FloatingOrigin
+        /// shifts the Unity origin out from under us. Layout:
+        /// tag(1) + delta(double3=24) = 25 bytes.
+        /// </summary>
+        public void WriteShiftWorld(double dx, double dy, double dz)
+        {
+            const int kSize = 25;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.ShiftWorld;
+            *(double*)p = dx;               p += 8;
+            *(double*)p = dy;               p += 8;
+            *(double*)p = dz;               p += 8;
             _len += kSize;
         }
 

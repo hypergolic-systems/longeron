@@ -32,6 +32,7 @@ namespace Longeron
 
             GameEvents.onLevelWasLoadedGUIReady.Add(OnLevelLoaded);
             GameEvents.onGameSceneLoadRequested.Add(OnSceneLoadRequested);
+            GameEvents.onFloatingOriginShift.Add(OnFloatingOriginShift);
 
             gameObject.AddComponent<LongeronSceneDriver>();
         }
@@ -40,7 +41,24 @@ namespace Longeron
         {
             GameEvents.onLevelWasLoadedGUIReady.Remove(OnLevelLoaded);
             GameEvents.onGameSceneLoadRequested.Remove(OnSceneLoadRequested);
+            GameEvents.onFloatingOriginShift.Remove(OnFloatingOriginShift);
             DisposeWorld();
+        }
+
+        // Krakensbane / FloatingOrigin shifted Unity's world origin.
+        // Translate every body in our Jolt world by the SAME delta so
+        // pose readback to Unity rigidbodies continues to render the
+        // vessel where the camera is looking. The signature carries
+        // both the Krakensbane component and the non-Krakensbane
+        // (FloatingOrigin) component; sum them for the full shift.
+        void OnFloatingOriginShift(Vector3d offset, Vector3d nonKrakensbane)
+        {
+            if (ActiveWorld == null) return;
+            // KSP applies the offset to stock objects' rb.position via
+            // `rb.position -= offset`. Mirror that on Jolt: subtract
+            // offset (and nonKrakensbane) from every body's position.
+            Vector3d delta = -(offset + nonKrakensbane);
+            ActiveWorld.Input.WriteShiftWorld(delta.x, delta.y, delta.z);
         }
 
         // Flight scene entry. The World is created here; vessel

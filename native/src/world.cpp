@@ -488,6 +488,28 @@ void LongeronWorld::HandleConstraintCreate(const uint8_t*& cur, const uint8_t* e
     mConstraintRegistry.emplace(constraint_id, constraint);
 }
 
+void LongeronWorld::HandleShiftWorld(const uint8_t*& cur, const uint8_t* end) {
+    const double dx = Read<double>(cur, end);
+    const double dy = Read<double>(cur, end);
+    const double dz = Read<double>(cur, end);
+#ifdef JPH_DOUBLE_PRECISION
+    const JPH::RVec3 delta(dx, dy, dz);
+#else
+    const JPH::RVec3 delta(static_cast<float>(dx), static_cast<float>(dy), static_cast<float>(dz));
+#endif
+
+    // KSP shifted Unity's world origin (Krakensbane / FloatingOrigin).
+    // Translate every body in absolute Jolt coords by the same delta
+    // so Jolt's pose readback continues to match Unity's expected
+    // view. Velocities are unaffected (a translation doesn't change
+    // them).
+    JPH::BodyInterface& bi = mPhysicsSystem.GetBodyInterface();
+    for (const auto& kv : mBodyRegistry) {
+        JPH::RVec3 p = bi.GetPosition(kv.second);
+        bi.SetPosition(kv.second, p + delta, JPH::EActivation::DontActivate);
+    }
+}
+
 void LongeronWorld::HandleConstraintDestroy(const uint8_t*& cur, const uint8_t* end) {
     const uint32_t constraint_id = Read<uint32_t>(cur, end);
     auto it = mConstraintRegistry.find(constraint_id);
@@ -588,6 +610,7 @@ int32_t LongeronWorld::Step(
         case RecordType::ForceDelta:        HandleForceDelta(cur, end); break;
         case RecordType::ConstraintCreate:  HandleConstraintCreate(cur, end); break;
         case RecordType::ConstraintDestroy: HandleConstraintDestroy(cur, end); break;
+        case RecordType::ShiftWorld:        HandleShiftWorld(cur, end); break;
         default:
             // Unknown / unsupported in Phase 1 — abort to avoid mis-
             // parsing the remainder of the stream.
