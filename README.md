@@ -1,17 +1,21 @@
 # Longeron
 
-A physics rewrite for Kerbal Space Program 1.12.5. Replaces the maximal-coordinate
-chain of `ConfigurableJoint`s that Squad uses to tie a vessel together with a
-single reduced-coordinate articulated body, integrated by Featherstone's
-Articulated-Body Algorithm.
+A physics rewrite for Kerbal Space Program 1.12.5. Replaces Unity's
+PhysX with [Jolt Physics](https://github.com/jrouwe/JoltPhysics) for
+vessel simulation, and layers a Featherstone articulated-body solver on
+top of Jolt to model joint compliance — eliminating the wobble of stock
+KSP without losing the structural flex Squad's joint model intentionally
+provides.
 
-> **Status: work in progress.** Longeron is under active development. The
-> articulated-body solver runs and a 3-part rocket sits stably on the launch
-> pad with PhysX-driven contact handoff, but everything past that —
-> liftoff, control authority, BG robotics, docking, vessel breakup, KAS/KIS
-> compatibility — is not implemented or not yet validated. Don't fly your
-> career save with it. Save first; expect crashes, NaN'd vessels, and
-> stranded Kerbals.
+> **Status: work in progress.** Longeron is mid-pivot. The original
+> articulated-body solver runs against PhysX-driven contact handoff in
+> earlier branches, but that approach is being replaced with a native
+> Jolt bridge after both kinematic and non-kinematic configurations
+> hit the same fundamental wall: Unity won't share rigidbody state
+> cleanly with PhysX. See [`CLAUDE.md`](CLAUDE.md) for the architecture
+> and `/Users/alx/.claude/plans/splendid-dancing-flute.md` for the
+> phased build plan. Don't fly your career save with it. Save first;
+> expect crashes, NaN'd vessels, and stranded Kerbals.
 
 The name is the [aerospace structural member](https://en.wikipedia.org/wiki/Longeron)
 that runs the length of a fuselage and keeps it rigid. That is approximately
@@ -40,9 +44,10 @@ Existing mitigations work by avoiding the regime, not by improving it:
 * **Autostrut** and the [Kerbal Joint Reinforcement](https://forum.kerbalspaceprogram.com/topic/55657-)
   family short-circuit the chain — they add direct constraints between
   distant parts, so PhysX has fewer steps to propagate residuals across.
-* Swapping the underlying physics engine (Jolt, PhysX 5) helps at the
-  margins because the inner solver gets faster or stabler, but the
-  formulation is the same.
+* Swapping the underlying physics engine (Jolt, PhysX 5) for KSP's
+  PhysX-3-vintage solver would help at the margins because the inner
+  solver is faster or stabler — but if the formulation stays maximal-
+  coordinate, the wobble stays too.
 
 Note that compliance is not the bug. Squad could have used Unity's
 `FixedJoint` everywhere and avoided wobble outright; they didn't,
@@ -53,69 +58,109 @@ choice. The bug is that PhysX's PGS, applied to a long chain of
 compliant constraints in maximal coordinates, diverges into wobble
 instead of converging into flex.
 
-Longeron changes the *formulation*, not the model of the joint.
-Featherstone's Articulated-Body Algorithm runs the spanning tree once
-per tick in O(n) leaf-to-root then root-to-leaf, computing joint
-accelerations from the current state and applied wrenches without any
-constraint-residual loop. Joint compliance enters as a local
-spring-damper term in joint space — applied at each joint
-individually — rather than as a constraint to be projected globally.
-The neighbour-residual coupling that breaks PGS on long chains with
-high mass ratios doesn't arise: there are no constraint residuals to
-converge. We keep the compliance Squad wanted; we lose the wobble that
-their solver was producing.
+Longeron changes both the *engine* and the *formulation*. Jolt — a
+modern, deterministic, multithread-friendly C++ rigid-body engine —
+replaces PhysX for collision detection, contact solving, and
+integration. On top of Jolt, Featherstone's Articulated-Body Algorithm
+runs the spanning tree once per tick in O(n) leaf-to-root then
+root-to-leaf, computing joint accelerations from the current state and
+applied wrenches without any constraint-residual loop. Joint compliance
+enters as a local spring-damper term in joint space — applied at each
+joint individually — rather than as a constraint to be projected
+globally. The neighbour-residual coupling that breaks PGS on long
+chains doesn't arise: there are no constraint residuals to converge.
+We keep the compliance Squad wanted; we lose the wobble that PhysX's
+PGS was producing.
+
+## Why Jolt, not PhysX
+
+Earlier iterations tried to keep Unity-PhysX for collision and layer
+Longeron's solver on top in C#. Both directions of that bargain failed
+on the same structural problem:
+
+* *Kinematic Unity rigidbodies* — clean integration ownership, but
+  PhysX silences contact callbacks for kinematic-vs-static pairs and
+  reverts position writes against a freeze anchor.
+* *Non-kinematic Unity rigidbodies* — contacts come back, but
+  computing a meaningful corrective wrench requires Longeron's solver
+  to *predict* what PhysX's contact solver is about to do. Two contact
+  solvers, neither authoritative.
+
+Diagnosis: Unity will not let the rigidbody state be shared cleanly
+with PhysX. Either PhysX owns integration (and Longeron fights
+position writes), or PhysX owns contacts (and Longeron runs a worse
+contact solver to stay in sync). There is no middle ground inside
+Unity's physics ownership model.
+
+Jolt sidesteps the problem by replacing PhysX entirely. Jolt is not
+*better at solving the same maximal-coordinate problem* — though it
+also is, and the Phase 2 build (Jolt's native `SixDOFConstraint` with
+stiff drives, no Featherstone yet) will already feel measurably less
+wobbly than stock — but the architectural win is *single ownership*:
+Jolt owns broadphase, contacts, and integration; Featherstone owns
+joint forces; Unity rigidbodies are kinematic proxies driven by Jolt
+each tick for the benefit of stock + modded code that reads
+`rb.velocity`, `rb.position`, etc. Nothing fights anything.
 
 ## Approach
 
-Longeron treats each loaded vessel as a single articulated body in
-reduced coordinates:
+Longeron's runtime pipeline, per `FixedUpdate`:
 
-* One spanning tree per vessel, rooted at `vessel.rootPart`. Every other
-  part is a child connected by a typed joint:
-  * **Compliant 6-DOF** — most stack and surface attachments. Six joint
-    DOFs (three translational, three rotational) with stiff
-    spring-damper drives toward the at-attachment relative pose, mass-
-    and geometry-derived stiffness. The wobble target. This is what
-    stock would call a stiff `ConfigurableJoint`; the difference is
-    in how the integrator handles it, not how the joint is modelled.
-  * **Revolute / Prismatic** (one DOF) — Breaking Ground hinges and
-    pistons. The DOF is the real, intended motion.
-  * **Free 6-DOF** (no drive) — pre-lock docking ports, until they latch.
-  * **Fixed** (zero DOF) — narrow edge case for tiny surface-mounted
-    parts (radial decouplers, science instruments) where the joint is
-    effectively a weld and the spring would just be numerical noise.
-* **Forward dynamics** via Featherstone's [**ABA**](https://en.wikipedia.org/wiki/Featherstone%27s_algorithm) —
-  one O(n) recursive pass per tick, computing joint accelerations from
-  the current state and applied wrenches.
-* **Loop closures** (docked rings, struts that close a cycle in the
-  vessel graph, BG servos that bridge two existing branches) handled
-  on top of the spanning-tree pass via Lagrange multipliers in a KKT
-  system. The multipliers double as constraint reaction forces — break
-  detection (`|λ| > breakForce`) is direct, not heuristic.
-* **Contact** with the world (terrain, KSC structures, other vessels) via
-  PhysX's existing collider geometry and broadphase — Unity owns
-  collision detection; we own everything that comes after.
-* **Integration** via semi-implicit Euler at KSP's existing
-  `FixedUpdate` rate (50 Hz). No substepping.
+1. **Accumulate inputs** in C#: per-body force/torque deltas (from
+   Harmony-intercepted `Rigidbody.AddForce*` calls), mass-update
+   records, topology mutations, gravity vectors.
+2. **Single P/Invoke** into the C++ bridge: `longeron_step(world,
+   inputs, outputs, dt)`. The bridge mutates the Jolt world per the
+   input records, runs `JPH::PhysicsSystem::Update`, and writes
+   per-body poses + contact records into the output buffer.
+3. **Read outputs** in C#: drain pose updates and contacts.
+4. **Write Unity rigidbody state** from output. Kinematic rigidbodies
+   take Jolt's pose so stock and modded code see consistent state.
 
-External wrenches (thrust, aero, control surfaces, RCS, reaction wheels,
-gravity) are inferred at the engine boundary by reading the velocity delta
-PhysX would have applied to each `Rigidbody` and converting back to a net
-force per tick — so stock and modded force-producers (FAR, RealFuels,
-RealPlume, KER) work without explicit integration.
+External wrenches (thrust, aero, RCS, reaction wheels, gravity) are
+captured at the engine boundary by patching `Rigidbody.AddForce*` to
+redirect into Longeron's per-body force accumulator — so stock and
+modded force-producers (FAR, RealFuels, RealPlume, KER) work without
+any per-mod special handling. Unity rigidbodies are kinematic, so the
+original `AddForce` is a no-op; the Harmony prefix replaces it cleanly.
 
-PhysX's Unity wrapper is kept in the loop deliberately. Unity still handles:
+Inside Jolt, each loaded vessel is N kinematic bodies (one per part)
+in a vessel-scoped `ObjectLayer` that filters out same-vessel
+self-collision. Joints between parts are handled differently in
+Phase 2 vs Phase 4:
 
-* Collider geometry, broadphase, and triangle-soup terrain raycasts.
-* Inter-vessel contact detection and collision events.
-* Wheel, ladder, and airlock-trigger semantics.
+* **Phase 2 (Jolt-native joints).** Adjacent parts are coupled by Jolt
+  `SixDOFConstraint`s with stiff per-axis spring/damper drives mirroring
+  stock's `ConfigurableJoint`. Inter-vessel coupling (docking, KAS) is
+  a Jolt constraint between bodies in different `ObjectLayer`s. PGS
+  in Jolt is meaningfully better than PhysX's at long chains and high
+  mass ratios, so this build already reduces wobble — but it is still
+  maximal-coordinate.
+* **Phase 4 (Featherstone).** All joints collapse to a single
+  `Compliant6DOF` primitive parameterized by per-axis stiffness,
+  damping, and motor force. Per-axis parameters select between what
+  stock would call fixed (high K, all axes), revolute (high K on 5,
+  motor on 1), prismatic (high K on 5, motor on 1), free (zero K),
+  or soft (medium K with high damping) — not separate joint types.
+  ABA computes joint forces in reduced coordinates and writes per-part
+  poses to Jolt each tick; Jolt sees no inter-body constraints, only
+  per-tick kinematic pose updates. **Loop closures collapse out of the
+  math**: cycle-closing graph edges (docking rings, KAS struts forming
+  cycles) are additional `Compliant6DOF` records contributing force
+  pairs from kinematic state, not constraints needing KKT projection.
+  Stiff joints use implicit ABA integration for unconditional
+  stability at KSP's 50 Hz `FixedUpdate`.
 
-Longeron's ownership stops at *constraint solving and integration*. Both
-sides need each other and neither tries to do the other's job.
+Terrain comes from Unity's PQS — colliders streamed in/out as the
+camera moves are mirrored into Jolt as static `MeshShape` bodies
+(Phase 3). KSC buildings, runway, water plane mirror the same way at
+scene load. Jolt is built with `JPH_DOUBLE_PRECISION=ON` so its world
+coordinates are doubles, eliminating floating-origin sync on the
+physics side; Krakensbane keeps shifting Unity's render origin.
 
 ## References
 
-The canonical reference for everything above:
+The canonical reference for the solver math:
 
 > Featherstone, Roy (2008). *Rigid Body Dynamics Algorithms.* Springer
 > US. [doi:10.1007/978-1-4899-7560-7](https://doi.org/10.1007/978-1-4899-7560-7).
@@ -125,11 +170,12 @@ Specifically:
 
 * **Chapter 7 — Forward Dynamics.** ABA, recursive form, joint-space
   inertia matrix, the spatial-vector machinery.
-* **Chapter 8 — Closed-Loop Systems.** KKT formulation for loop closure
-  via Lagrange multipliers; baseline for `Longeron.Physics.Solver.LoopClosure`.
+* **Chapter 9 — Joint Modeling.** Spring-damper joint formulation;
+  basis for the implicit ABA integrator that Phase 4 uses for stiff
+  compliant joints.
 
-Adjacent reading that explains why PhysX's choice of formulation matters
-even though its solver is fine:
+Adjacent reading on why the choice of formulation matters even when the
+solver is fine:
 
 * Erleben, Kenny (2007). "[Velocity-based shock propagation for
   multibody dynamics animation.](https://dl.acm.org/doi/10.1145/1243980.1243986)"
@@ -139,6 +185,14 @@ even though its solver is fine:
   Systems](https://people.eecs.berkeley.edu/~jfc/mirtich/thesis/mirtichThesis.pdf)*
   (Ph.D. thesis, UC Berkeley). The other way to dodge the convergence
   problem, which KSP didn't take.
+
+The Jolt engine itself:
+
+* [Jolt Physics](https://github.com/jrouwe/JoltPhysics) — open-source
+  C++ rigid-body engine, Apache-2.0. The
+  [architecture document](https://jrouwe.github.io/JoltPhysics/) walks
+  through the broadphase, contact manager, constraint solver, and
+  determinism guarantees.
 
 ## License
 
