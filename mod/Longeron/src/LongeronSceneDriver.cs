@@ -55,28 +55,22 @@ namespace Longeron
                 if (mv.Vessel == null || mv.Vessel.state == Vessel.State.DEAD) continue;
                 LongeronVesselModule.ApplyKinematicTakeover(mv.Vessel);
 
-                // Gravity: use FlightGlobals.getGeeForceAtPosition for
-                // a clean gravity-only vector at the vessel's CoM.
-                // Pure gravity (no rotating-frame fictitious forces).
-                // Phase 2.0 sets Jolt's global gravity once per tick;
-                // Phase 4 will make this per-body for multi-planet
-                // scenes via per-tick ForceDelta records.
-                if (mv.Vessel == FlightGlobals.ActiveVessel && mv.Vessel.rootPart != null)
+                // Phase 2.1: gravity comes through FlightIntegrator's
+                // per-body rb.AddForce(integrationAccel·mass) calls,
+                // which our RigidbodyForceHooks Harmony patches now
+                // redirect into per-tick ForceDelta records. Jolt's
+                // global gravity stays at zero — applying it here
+                // would double-count.
+                if (mv.Vessel == FlightGlobals.ActiveVessel
+                    && mv.Vessel.rootPart != null
+                    && (_tick % kLogEveryTicks) == 0)
                 {
-                    Vector3d g = FlightGlobals.getGeeForceAtPosition(mv.Vessel.rootPart.transform.position);
-                    world.Input.WriteSetGravity(g.x, g.y, g.z);
-
-                    if ((_tick % kLogEveryTicks) == 0)
-                    {
-                        var fv = Krakensbane.GetFrameVelocity();
-                        var rootPos = mv.Vessel.rootPart.transform.position;
-                        Debug.Log(LogPrefix + string.Format(
-                            "tick={0} grav=({1:F3},{2:F3},{3:F3}) |g|={4:F2} fv=({5:F2},{6:F2},{7:F2}) rootPos=({8:F2},{9:F2},{10:F2})",
-                            _tick,
-                            g.x, g.y, g.z, g.magnitude,
-                            fv.x, fv.y, fv.z,
-                            rootPos.x, rootPos.y, rootPos.z));
-                    }
+                    var fv = Krakensbane.GetFrameVelocity();
+                    var rootPos = mv.Vessel.rootPart.transform.position;
+                    Debug.Log(LogPrefix + string.Format(
+                        "tick={0} fv=({1:F2},{2:F2},{3:F2}) rootPos=({4:F2},{5:F2},{6:F2})",
+                        _tick, fv.x, fv.y, fv.z,
+                        rootPos.x, rootPos.y, rootPos.z));
                 }
 
                 // Phase 2.0: Jolt owns pose. Initial position came in

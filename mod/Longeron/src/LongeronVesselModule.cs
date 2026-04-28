@@ -16,9 +16,15 @@ namespace Longeron
     {
         const string LogPrefix = "[Longeron/Vessel] ";
 
-        // Per-part KSP mass conversion. KSP exposes Part.mass +
-        // GetResourceMass() in tonnes; the bridge expects kilograms.
-        const float TonneToKg = 1000f;
+        // KSP's internal force API operates in kN with mass in tonnes
+        // (kN / t = m/s² so F = m·a works dimensionally without an
+        // explicit unit conversion). When stock code calls
+        // Rigidbody.AddForce it passes a kN value with the rb.mass
+        // also in tonnes — Unity's integrator just sees a consistent
+        // pair. We mirror the same convention into Jolt: pass the
+        // body mass in tonnes, leave forces in kN, and Jolt's
+        // integrator does kN / t = m/s² exactly the same way.
+        // No 1000× scaling on either side.
 
         public override void OnGoOffRails()
         {
@@ -34,12 +40,9 @@ namespace Longeron
             {
                 if (part == null) continue;
 
-                // Phase 1.5: every part is a kinematic body in the
-                // Kinematic layer. Mass is informational only —
-                // kinematic bodies don't respond to forces — but we
-                // pass it through for symmetry with future phases.
-                float mass = (part.mass + part.GetResourceMass()) * TonneToKg;
-                if (mass < 1e-3f) mass = 10f;
+                // Mass in tonnes (KSP's internal convention).
+                float mass = part.mass + part.GetResourceMass();
+                if (mass < 1e-6f) mass = 0.01f;
 
                 var handle = SceneRegistry.MintBodyHandle();
                 bool ok = ColliderWalker.WriteBodyFor(
