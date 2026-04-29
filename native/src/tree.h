@@ -97,6 +97,21 @@ public:
         JPH::Vec3 force_world, JPH::RVec3 point_world,
         JPH::RVec3 body_com_world, JPH::Quat body_rot);
 
+    // Route a contact-resolved force into the per-part accumulator.
+    // The application point is in CB-frame world coords; the per-part
+    // attribution is by closest body-local CoM (linear scan over the
+    // vessel's parts). No-op when the body has no tree.
+    //
+    // TODO (Phase 4.x): replace the O(n_parts) closest-CoM scan with
+    // an O(1) sub-shape→part_idx lookup precomputed at BodyCreate /
+    // VesselTreeUpdate time. Capture (body_pair → sub_shape_pair) in
+    // ContactListener::OnContactPersisted so the constraint→part
+    // mapping is exact instead of position-based.
+    void RouteContactForce(
+        uint32_t body_id,
+        JPH::Vec3 force_world, JPH::RVec3 point_world,
+        JPH::RVec3 body_com_world, JPH::Quat body_rot);
+
     // Run RNEA for every tree using current Jolt state. Fills the
     // mLastSummaries vector with one entry per vessel (only when the
     // emit cadence ticks). Caller (world.cpp) drains into the output

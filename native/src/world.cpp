@@ -1,5 +1,6 @@
 #include "world.h"
 #include "contact_listener.h"
+#include "contact_solve_listener.h"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
@@ -179,6 +180,14 @@ LongeronWorld::LongeronWorld(const ::LongeronConfig& cfg)
 
     mContactListener = std::make_unique<ContactListenerImpl>(this);
     mPhysicsSystem.SetContactListener(mContactListener.get());
+
+    // Phase 4.2: post-solve callback that routes per-contact resolved
+    // impulses (lambdas from Jolt's velocity solver) into the per-part
+    // external-wrench accumulator. Without it, RNEA joint forces are
+    // upper-bound (suspended-vessel weight) when the vessel is in
+    // contact with anything.
+    mContactSolveListener = std::make_unique<ContactSolveListenerImpl>(this);
+    mPhysicsSystem.SetContactSolveListener(mContactSolveListener.get());
 
     // 1 sub-group per vessel — every part of a vessel shares
     // sub_group_id = 0, so GroupFilterTable's "same group + same
@@ -901,6 +910,7 @@ int32_t LongeronWorld::Step(
     mOutputCap      = output_cap;
     mOutputLen      = 0;
     mOutputOverflow = false;
+    mCurrentDt      = dt;
 
     // 1. Apply input records.
     const uint8_t* cur = input;

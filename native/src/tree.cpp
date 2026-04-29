@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace longeron {
 
@@ -59,6 +60,43 @@ void TreeRegistry::AccumulateExternalForce(
 
     t.ext_force[part_idx]  = t.ext_force[part_idx]  + force_local;
     t.ext_torque[part_idx] = t.ext_torque[part_idx] + lever_local.Cross(force_local);
+}
+
+void TreeRegistry::RouteContactForce(
+    uint32_t body_id,
+    JPH::Vec3 force_world, JPH::RVec3 point_world,
+    JPH::RVec3 body_com_world, JPH::Quat body_rot)
+{
+    auto it = mTrees.find(body_id);
+    if (it == mTrees.end()) return;
+    const VesselTree& t = it->second;
+    if (t.nodes.empty()) return;
+
+    // Project the contact point into body-local frame for the per-part
+    // proximity scan.
+    JPH::Quat body_rot_inv = body_rot.Conjugated();
+    JPH::RVec3 P_rel = point_world - body_com_world;
+    JPH::Vec3 P_local(
+        static_cast<float>(P_rel.GetX()),
+        static_cast<float>(P_rel.GetY()),
+        static_cast<float>(P_rel.GetZ()));
+    P_local = body_rot_inv * P_local;
+
+    // Closest part by CoM. Linear scan; vessels typically have ≤30
+    // parts so this is cheap. See header TODO for the O(1) replacement.
+    uint16_t best_idx = 0;
+    float best_dist2 = std::numeric_limits<float>::infinity();
+    for (uint16_t i = 0; i < t.nodes.size(); ++i) {
+        JPH::Vec3 d = P_local - t.nodes[i].com_local;
+        float d2 = d.LengthSq();
+        if (d2 < best_dist2) {
+            best_dist2 = d2;
+            best_idx = i;
+        }
+    }
+
+    AccumulateExternalForce(body_id, best_idx, force_world, point_world,
+                             body_com_world, body_rot);
 }
 
 namespace {

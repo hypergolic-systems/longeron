@@ -75,6 +75,7 @@ add_library(longeron_native SHARED
     src/bridge.cpp
     src/world.cpp
     src/contact_listener.cpp
+    src/contact_solve_listener.cpp
     src/tree.cpp
 )
 

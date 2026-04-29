@@ -49,6 +49,17 @@ public:
     // mid-step or is unknown.
     uint32_t GetUserIdForBody(const JPH::Body& body) const;
 
+    // Used by ContactSolveListenerImpl to convert per-tick impulse
+    // (J = lambda × axis) into force (J / dt) when routing contact
+    // reactions into the per-part accumulator. Snapshotted at the
+    // start of each Step so the listener has a stable value through
+    // the entire physics update.
+    float GetCurrentDt() const { return mCurrentDt; }
+
+    // Used by ContactSolveListenerImpl to attribute per-constraint
+    // impulses to KSP parts via the per-vessel spanning tree.
+    TreeRegistry& GetTreeRegistry() { return mTreeRegistry; }
+
     // Output buffer accessors used by the contact listener while
     // PhysicsSystem::Update is running. The contact listener fires from
     // worker threads, so output writes are protected by mOutputMutex.
@@ -97,6 +108,12 @@ private:
     JPH::Ref<JPH::GroupFilterTable>       mGroupFilter;
     JPH::PhysicsSystem           mPhysicsSystem;
     std::unique_ptr<ContactListenerImpl>  mContactListener;
+    std::unique_ptr<class ContactSolveListenerImpl> mContactSolveListener;
+
+    // Snapshotted at the start of each Step so post-solve callbacks
+    // (which fire from worker threads inside JobPreIntegrateVelocity)
+    // have a stable dt to convert per-tick impulse → force.
+    float mCurrentDt = 0.0f;
 
     // Body registry: user_id → JPH::BodyID. Body's mUserData stores
     // user_id (uint64) so reverse lookup uses Body::GetUserData() and
