@@ -48,9 +48,10 @@ namespace Longeron.Native
     /// </summary>
     public enum ShapeKind : byte
     {
-        Box        = 0,
-        Sphere     = 1,
-        ConvexHull = 2,
+        Box          = 0,
+        Sphere       = 1,
+        ConvexHull   = 2,
+        TriangleMesh = 3,
     }
 
     /// <summary>
@@ -62,6 +63,7 @@ namespace Longeron.Native
     public static class ShapeLimits
     {
         public const int MaxConvexHullVertices = 256;
+        public const int MaxMeshTriangles = 4096;
     }
 
     /// <summary>
@@ -268,6 +270,54 @@ namespace Longeron.Native
             _len += kSize;
         }
 
+        /// <summary>
+        /// Append a TriangleMesh sub-shape. <paramref name="vertices"/>
+        /// is xyz-packed (length must be a multiple of 3) in the
+        /// sub-shape's local frame; <paramref name="triangles"/> is
+        /// index-packed (length must be a multiple of 3) referring to
+        /// vertex indices. Used for streaming PQS terrain quads —
+        /// static-only on the native side.
+        /// </summary>
+        public void AppendShapeTriangleMesh(
+            float subPosX, float subPosY, float subPosZ,
+            float subRotX, float subRotY, float subRotZ, float subRotW,
+            float[] vertices, int[] triangles)
+        {
+            if (vertices == null || vertices.Length == 0 || (vertices.Length % 3) != 0)
+                throw new ArgumentException("vertices must be a non-empty xyz-packed array",
+                                             nameof(vertices));
+            if (triangles == null || triangles.Length == 0 || (triangles.Length % 3) != 0)
+                throw new ArgumentException("triangles must be a non-empty index-triplet array",
+                                             nameof(triangles));
+
+            uint vertCount = (uint)(vertices.Length / 3);
+            uint triCount  = (uint)(triangles.Length / 3);
+            // sub_pos(12) + sub_rot(16) + kind(1) + vert_count(4) + verts(12*N)
+            //   + tri_count(4) + tris(12*M)
+            int kSize = 33 + (int)vertCount * 12 + 4 + (int)triCount * 12;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *(float*)p = subPosX;           p += 4;
+            *(float*)p = subPosY;           p += 4;
+            *(float*)p = subPosZ;           p += 4;
+            *(float*)p = subRotX;           p += 4;
+            *(float*)p = subRotY;           p += 4;
+            *(float*)p = subRotZ;           p += 4;
+            *(float*)p = subRotW;           p += 4;
+            *p++ = (byte)ShapeKind.TriangleMesh;
+            *(uint*)p = vertCount;          p += 4;
+            for (int i = 0; i < vertices.Length; ++i)
+            {
+                *(float*)p = vertices[i];   p += 4;
+            }
+            *(uint*)p = triCount;           p += 4;
+            for (int i = 0; i < triangles.Length; ++i)
+            {
+                *(uint*)p = (uint)triangles[i]; p += 4;
+            }
+            _len += kSize;
+        }
+
         // -- Convenience wrappers (single sub-shape, identity transform) --
 
         public void WriteBodyCreateBox(
@@ -310,6 +360,23 @@ namespace Longeron.Native
                             rotX, rotY, rotZ, rotW,
                             mass, shapeCount: 1, groupId: groupId);
             AppendShapeConvexHull(0, 0, 0, 0, 0, 0, 1, vertices);
+        }
+
+        public void WriteBodyCreateTriangleMesh(
+            BodyHandle body, Layer layer,
+            float[] vertices, int[] triangles,
+            double posX, double posY, double posZ,
+            float rotX, float rotY, float rotZ, float rotW,
+            uint groupId = 0)
+        {
+            // Triangle meshes are static-only — Jolt's MeshShape isn't
+            // valid on Dynamic / Kinematic bodies. Mass is meaningless
+            // for static bodies; pass 0.
+            BeginBodyCreate(body, BodyType.Static, layer,
+                            posX, posY, posZ,
+                            rotX, rotY, rotZ, rotW,
+                            mass: 0f, shapeCount: 1, groupId: groupId);
+            AppendShapeTriangleMesh(0, 0, 0, 0, 0, 0, 1, vertices, triangles);
         }
 
         /// <summary>

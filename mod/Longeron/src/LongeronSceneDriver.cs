@@ -52,6 +52,14 @@ namespace Longeron
             // pose / force records ride the same input buffer.
             TopologyReconciler.Reconcile(world.Input);
 
+            // Phase 3b: re-mirror PQS terrain quads whose Unity-side
+            // transforms have drifted from where we last baked them.
+            // CelestialBody position changes propagate through PQS
+            // independently of FloatingOrigin, so static Jolt mesh
+            // bodies need a periodic refresh.
+            Streamer.UpdateActive();
+            Streamer.LogVesselTerrainDiag();
+
             // Spawn the synthetic ground once we have a vessel anchor.
             if (!_groundSpawned)
                 TrySpawnSyntheticGround(world);

@@ -53,9 +53,10 @@ enum class BodyType : uint8_t {
 //   ConvexHull — u32 vertex_count + vertex_count × float3
 //                (4 + 12·N bytes; N capped at kMaxConvexHullVertices)
 enum class ShapeKind : uint8_t {
-    Box        = 0,
-    Sphere     = 1,
-    ConvexHull = 2,
+    Box          = 0,
+    Sphere       = 1,
+    ConvexHull   = 2,
+    TriangleMesh = 3,   // Phase 3b: streaming PQS terrain quads — static-only
 };
 
 // Cap on vertices passed to JPH::ConvexHullShapeSettings. Jolt itself
@@ -63,6 +64,12 @@ enum class ShapeKind : uint8_t {
 // bound input-buffer growth and to surface "absurd mesh" cases as
 // truncation warnings rather than silently massive payloads.
 inline constexpr uint32_t kMaxConvexHullVertices = 256;
+
+// Cap on triangle counts for TriangleMesh sub-shapes. Default PQS
+// quads ship 392 triangles (15×15 vertex grid → 2 × 14² triangles)
+// so 4096 is a comfortable ~10× headroom; bumps if mods change PQS
+// resolution (Parallax / Kopernicus stretch this).
+inline constexpr uint32_t kMaxMeshTriangles = 4096;
 
 // Constraint kinds carried in ConstraintCreate records.
 //   Fixed   — JPH::FixedConstraint with mAutoDetectPoint=true. Rigidly

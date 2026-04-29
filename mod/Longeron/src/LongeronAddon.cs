@@ -96,6 +96,13 @@ namespace Longeron
             var driver = GetComponent<LongeronSceneDriver>();
             if (driver != null) driver.NotifyWorldCreated();
 
+            // Phase 3b: inject our PQSMod into every CelestialBody's
+            // PQS so we receive OnQuadBuilt/Update/Destroy callbacks
+            // for streaming terrain mirroring. Includes a sweep of
+            // already-built quads so terrain near the launchpad lands
+            // in Jolt without waiting for the player to move.
+            Streamer.AttachToAllPQS();
+
             // Sweep already-unpacked vessels — VesselModule.OnGoOffRails
             // for these fired before ActiveWorld existed. Each vessel's
             // module instance can re-issue the register manually.

@@ -69,6 +69,17 @@ namespace Longeron
         public static bool TryGet(uint bodyId, out JoltBody jb) =>
             _byHandle.TryGetValue(bodyId, out jb);
 
+        // Public hook for sibling component-owners (QuadBody for PQS
+        // terrain quads, future SceneObjectBody for KSC static, etc.)
+        // that participate in the same per-tick BodyDestroy drain.
+        // Reusing the queue keeps a single drain site in
+        // TopologyReconciler.Reconcile rather than scattering bridge
+        // bookkeeping across resource owners.
+        public static void EnqueuePendingDestroy(BodyHandle handle)
+        {
+            if (handle.IsValid) _pendingDestroy.Enqueue(handle);
+        }
+
         void OnDestroy()
         {
             if (Handle.IsValid)

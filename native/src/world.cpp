@@ -10,6 +10,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 
 #include <cstdarg>
@@ -131,7 +132,11 @@ LongeronWorld::LongeronWorld(const ::LongeronConfig& cfg)
     , mJobSystem(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
                  std::max(1u, std::thread::hardware_concurrency() - 1))
 {
-    const uint32_t max_bodies         = cfg.max_bodies      ? cfg.max_bodies      : 4096;
+    // Default max_bodies bumped to 16384 to accommodate Phase 3b PQS
+    // terrain streaming. A typical near-surface scene tops ~1000–4000
+    // collider quads; combined with vessel parts and any future
+    // KSC-static mirror, 16384 is comfortable headroom.
+    const uint32_t max_bodies         = cfg.max_bodies      ? cfg.max_bodies      : 16384;
     const uint32_t max_constraints    = cfg.max_constraints ? cfg.max_constraints : 4096;
     const uint32_t num_body_mutexes   = 0;       // Jolt picks a sensible default
     const uint32_t max_body_pairs     = max_bodies * 8;
@@ -292,6 +297,59 @@ static JPH::RefConst<JPH::Shape> BuildSubShape(const uint8_t*& cur, const uint8_
         JPH::Shape::ShapeResult result = settings.Create();
         if (result.HasError()) {
             JPH::Trace("ConvexHull create failed: %s", result.GetError().c_str());
+            return JPH::RefConst<JPH::Shape>();
+        }
+        return result.Get();
+    }
+    case ShapeKind::TriangleMesh: {
+        // Wire format:
+        //   u32 vertex_count, vertex_count × float3 vertices,
+        //   u32 triangle_count, triangle_count × u32×3 indices.
+        // Used for streaming PQS terrain quads. Static-only — Jolt's
+        // MeshShape isn't supported on Dynamic / Kinematic bodies
+        // (Body::SetShape would assert), so the caller guarantees
+        // BodyType::Static.
+        const uint32_t vertex_count = Read<uint32_t>(cur, end);
+        JPH::VertexList verts;
+        verts.reserve(vertex_count);
+        for (uint32_t i = 0; i < vertex_count; ++i) {
+            const JPH::Vec3 v = ReadFloat3(cur, end);
+            verts.push_back(JPH::Float3(v.GetX(), v.GetY(), v.GetZ()));
+        }
+
+        const uint32_t raw_tri_count = Read<uint32_t>(cur, end);
+        const uint32_t tri_count = raw_tri_count > kMaxMeshTriangles
+                                       ? kMaxMeshTriangles
+                                       : raw_tri_count;
+        if (raw_tri_count > kMaxMeshTriangles) {
+            JPH::Trace("TriangleMesh truncated: %u tris capped at %u",
+                       raw_tri_count, kMaxMeshTriangles);
+        }
+        JPH::IndexedTriangleList indices;
+        indices.reserve(tri_count);
+        for (uint32_t i = 0; i < tri_count; ++i) {
+            const uint32_t i0 = Read<uint32_t>(cur, end);
+            const uint32_t i1 = Read<uint32_t>(cur, end);
+            const uint32_t i2 = Read<uint32_t>(cur, end);
+            indices.push_back(JPH::IndexedTriangle(i0, i1, i2));
+        }
+        // Skip any remaining truncated triangles so the cursor lines up.
+        for (uint32_t i = tri_count; i < raw_tri_count; ++i) {
+            (void)Read<uint32_t>(cur, end);
+            (void)Read<uint32_t>(cur, end);
+            (void)Read<uint32_t>(cur, end);
+        }
+
+        if (verts.empty() || indices.empty()) {
+            JPH::Trace("TriangleMesh: empty verts (%u) or tris (%u), skipping",
+                       (unsigned)verts.size(), (unsigned)indices.size());
+            return JPH::RefConst<JPH::Shape>();
+        }
+
+        JPH::MeshShapeSettings settings(verts, indices);
+        JPH::Shape::ShapeResult result = settings.Create();
+        if (result.HasError()) {
+            JPH::Trace("TriangleMesh create failed: %s", result.GetError().c_str());
             return JPH::RefConst<JPH::Shape>();
         }
         return result.Get();
