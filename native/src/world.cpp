@@ -449,6 +449,16 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
     // contacts. Set it on every body we register.
     settings.mCollideKinematicVsNonDynamic = true;
 
+    // Jolt clamps body velocities to mMaxLinearVelocity (default
+    // 500 m/s) / mMaxAngularVelocity (default 0.25π·60 rad/s ≈
+    // 47 rad/s). 500 m/s is fine for game physics but caps KSP
+    // vessels at ~Mach 1.5 — a vessel hitting 500 m/s in atmospheric
+    // flight or accelerating toward orbital (~7800 m/s on Kerbin)
+    // would silently stop accelerating. Bump well above any realistic
+    // KSP scenario; interplanetary transfer dVs are tens of km/s.
+    settings.mMaxLinearVelocity = 100000.0f;   // 100 km/s
+    settings.mMaxAngularVelocity = 200.0f;     // ≈ 32 rev/s
+
     // Per-vessel collision group: bodies sharing a non-zero group_id
     // skip collision with each other (sub_group_id = 0 for every
     // part within a vessel, GroupFilterTable rejects same-subgroup
