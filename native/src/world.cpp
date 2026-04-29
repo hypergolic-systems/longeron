@@ -449,6 +449,20 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
     settings.mMaxLinearVelocity = 100000.0f;   // 100 km/s
     settings.mMaxAngularVelocity = 200.0f;     // ≈ 32 rev/s
 
+    // Jolt's defaults bake in implicit linear/angular damping
+    // (mLinearDamping = mAngularDamping = 0.05) — `dv/dt = -c*v`.
+    // At v=600 m/s that's 30 m/s² of "drag" that doesn't come from
+    // anywhere physical, on top of stock KSP's atmospheric drag (which
+    // we already redirect through Harmony hooks).
+    //
+    // Stock KSP leaves rb.drag = 0 (PhysX equivalent of mLinearDamping).
+    // It does set rb.angularDrag dynamically per-part for atmospheric
+    // angular drag, but that's also not what Jolt's mAngularDamping
+    // models. Zero both — let Jolt integrate strictly the forces we
+    // give it, no implicit decay.
+    settings.mLinearDamping  = 0.0f;
+    settings.mAngularDamping = 0.0f;
+
     // Per-vessel collision group: bodies sharing a non-zero group_id
     // skip collision with each other (sub_group_id = 0 for every
     // part within a vessel, GroupFilterTable rejects same-subgroup
