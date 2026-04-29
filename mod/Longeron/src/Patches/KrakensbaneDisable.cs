@@ -8,20 +8,23 @@
 //
 // We patch:
 //   - Krakensbane.FixedUpdate     → no-op (skip engagement state machine)
+//   - Krakensbane.AddExcess       → no-op (the engage helper that
+//                                          mutates FrameVel and
+//                                          calls vessel.ChangeWorldVelocity
+//                                          on every loaded vessel)
 //   - GetFrameVelocity / V3f      → return zero
+//
+// AddFrameVelocity calls AddExcess after a SafeToEngage check; for
+// landed/PRELAUNCH vessels SafeToEngage returns false so it's already
+// a no-op there, but for vessels unpacking in flight it would
+// otherwise modify rb.velocity on every loaded vessel. Patching
+// AddExcess covers all paths.
 //
 // With FrameVel ≡ 0:
 //   rb.velocity                  is the actual Unity-world velocity
 //   vessel.velocityD             == rb.velocity (stock formula)
 //   vessel.obt_velocity          == velocityD
 //   vessel.srf_velocity          == velocityD - mainBody.getRFrmVel(p)
-// All stock readers that derive from these continue to work; the only
-// path that would have broken is direct reads of FrameVel, which now
-// observe zero.
-//
-// AddFrameVelocity / AddExcess / Zero are not patched: if a
-// modded code path explicitly wants to set FrameVel they can; we just
-// don't drive the state machine ourselves.
 
 using HarmonyLib;
 using UnityEngine;
@@ -30,6 +33,12 @@ namespace Longeron.Patches
 {
     [HarmonyPatch(typeof(Krakensbane), "FixedUpdate")]
     static class Krakensbane_FixedUpdate_Skip
+    {
+        static bool Prefix() => false;
+    }
+
+    [HarmonyPatch(typeof(Krakensbane), nameof(Krakensbane.AddExcess))]
+    static class Krakensbane_AddExcess_Skip
     {
         static bool Prefix() => false;
     }

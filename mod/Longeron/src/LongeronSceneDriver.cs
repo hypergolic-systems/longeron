@@ -224,10 +224,17 @@ namespace Longeron
             // ApplyPoseToRigidbody set on rb.velocity.
             //
             // With Krakensbane patched out (FrameVel ≡ 0):
-            //   rb.velocity     == inertial Unity-world velocity
-            //   velocityD       == rb.velocity (stock formula reduces)
-            //   obt_velocity    == velocityD (orbital == inertial)
-            //   srf_velocity    == velocityD − ω×r at part position
+            //   rb.velocity == velocityD (stock formula reduces)
+            //
+            // The frame interpretation depends on body.inverseRotation:
+            //   inverseRotation=true (low alt):  rb.velocity is in the
+            //     surface-rotating frame. Stock convention here is
+            //     velocityD = rb.velocity = "surface velocity"
+            //     (rotating frame); obt_velocity = velocityD + ω×r.
+            //   inverseRotation=false (high alt): rb.velocity is in the
+            //     inertial frame. velocityD = rb.velocity = inertial;
+            //     obt_velocity = velocityD; srf_velocity = velocityD - ω×r.
+            //
             // Stock derives srf/obt via the orbit (Vessel.cs:3530); we
             // shortcut from rb.velocity since the orbit isn't always
             // current at our +10000 execution order.
@@ -241,8 +248,19 @@ namespace Longeron
             v.velocityD = rbVel;
 
             Vector3d rotVelAtCoM = v.mainBody.getRFrmVel(v.CoMD);
-            v.obt_velocity = v.velocityD;
-            v.srf_velocity = v.velocityD - rotVelAtCoM;
+            if (v.mainBody.inverseRotation)
+            {
+                // Unity world is the rotating frame; rb.velocity is
+                // surface velocity directly.
+                v.srf_velocity = v.velocityD;
+                v.obt_velocity = v.velocityD + rotVelAtCoM;
+            }
+            else
+            {
+                // Unity world is inertial; subtract surface rotation.
+                v.obt_velocity = v.velocityD;
+                v.srf_velocity = v.velocityD - rotVelAtCoM;
+            }
             v.obt_speed = v.obt_velocity.magnitude;
             v.upAxis = (v.CoMD - v.mainBody.position).normalized;
             v.verticalSpeed = Vector3d.Dot(v.srf_velocity, v.upAxis);

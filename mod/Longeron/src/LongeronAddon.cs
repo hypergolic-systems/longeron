@@ -36,6 +36,7 @@ namespace Longeron
             GameEvents.onVesselCreate.Add(OnVesselCreated);
             GameEvents.onVesselDestroy.Add(OnVesselDestroyed);
             GameEvents.onVesselSOIChanged.Add(OnVesselSOIChanged);
+            GameEvents.onRotatingFrameTransition.Add(OnRotatingFrameTransition);
 
             gameObject.AddComponent<LongeronSceneDriver>();
         }
@@ -48,6 +49,7 @@ namespace Longeron
             GameEvents.onVesselCreate.Remove(OnVesselCreated);
             GameEvents.onVesselDestroy.Remove(OnVesselDestroyed);
             GameEvents.onVesselSOIChanged.Remove(OnVesselSOIChanged);
+            GameEvents.onRotatingFrameTransition.Remove(OnRotatingFrameTransition);
             DisposeWorld();
         }
 
@@ -75,6 +77,22 @@ namespace Longeron
             if (ev.host != FlightGlobals.ActiveVessel) return;
             if (ActiveWorld == null) return;
             Debug.Log(LogPrefix + $"SOI change for active vessel: {ev.from?.name} -> {ev.to?.name} — rebuilding world");
+            RebuildWorld();
+        }
+
+        // Dominant body's inverseRotation flag flips (typically when
+        // the active vessel crosses inverseRotThresholdAltitude — 70km
+        // on Kerbin). Stock's OrbitPhysicsManager.setRotatingFrame
+        // re-stamps every part's rb.velocity to match the new frame
+        // (OrbitPhysicsManager.cs:337); our CbFrame branches on
+        // body.inverseRotation, so the boundary-transform meaning
+        // changes mid-tick. Rebuild to re-bake every Jolt body in
+        // the new frame from the now-current Unity-world poses.
+        void OnRotatingFrameTransition(GameEvents.HostTargetAction<CelestialBody, bool> ev)
+        {
+            if (ActiveWorld == null) return;
+            if (ev.host != FlightGlobals.ActiveVessel?.mainBody) return;
+            Debug.Log(LogPrefix + $"rotating-frame transition on {ev.host?.name} → inverseRotation={ev.target} — rebuilding world");
             RebuildWorld();
         }
 
