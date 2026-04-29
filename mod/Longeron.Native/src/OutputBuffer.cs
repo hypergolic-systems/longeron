@@ -18,21 +18,25 @@ namespace Longeron.Native
     }
 
     /// <summary>
-    /// Per-vessel RNEA pass summary (Phase 4 advisory). Native side
-    /// emits at ~1 Hz; C# logs them via the scene driver.
+    /// Per-vessel RNEA summary, decomposed in each joint's reference
+    /// frame (Phase 4 advisory). Joint axis = parent CoM → child
+    /// joint anchor in body-local. Compression = F·axis when positive;
+    /// tension = -F·axis when negative; shear = perpendicular F.
+    /// Torsion = T·axis; bending = perpendicular T. Only tension /
+    /// shear / torsion / bending are candidates for breakForce /
+    /// breakTorque comparison — compression doesn't break joints.
     /// </summary>
     public struct RneaSummaryRecord
     {
         public BodyHandle Body;
         public ushort PartCount;
-        public float  MaxF;       // largest joint force magnitude (kN, KSP convention)
-        public ushort MaxFIdx;    // part index where MaxF lives (joint to its parent)
-        public float  MaxT;
-        public ushort MaxTIdx;
-        public float  SumF;
-        public float  SumT;
-        public float  AccelMag;   // |a_body| this tick (finite-diff)
-        public float  AlphaMag;   // |α_body| this tick
+        public float  MaxCompression;     public ushort MaxCompressionIdx;
+        public float  MaxTension;         public ushort MaxTensionIdx;
+        public float  MaxShear;           public ushort MaxShearIdx;
+        public float  MaxTorsion;         public ushort MaxTorsionIdx;
+        public float  MaxBending;         public ushort MaxBendingIdx;
+        public float  AccelMag;
+        public float  AlphaMag;
     }
 
     /// <summary>
@@ -135,22 +139,26 @@ namespace Longeron.Native
 
         public void ReadRneaSummary(out RneaSummaryRecord record)
         {
-            const int kPayload = 34;  // body_id(4) + part_count(2) + maxF(4) + maxFIdx(2)
-                                       // + maxT(4) + maxTIdx(2) + sumF(4) + sumT(4)
+            const int kPayload = 44;  // body_id(4) + part_count(2)
+                                       // + 5 × (float(4) + idx(2)) = 30
                                        // + accel(4) + alpha(4)
             EnsureBytes(kPayload);
             byte* p = _ptr + _cursor;
             record = default;
-            record.Body      = new BodyHandle(*(uint*)p);   p += 4;
-            record.PartCount = *(ushort*)p;                 p += 2;
-            record.MaxF      = *(float*)p;                  p += 4;
-            record.MaxFIdx   = *(ushort*)p;                 p += 2;
-            record.MaxT      = *(float*)p;                  p += 4;
-            record.MaxTIdx   = *(ushort*)p;                 p += 2;
-            record.SumF      = *(float*)p;                  p += 4;
-            record.SumT      = *(float*)p;                  p += 4;
-            record.AccelMag  = *(float*)p;                  p += 4;
-            record.AlphaMag  = *(float*)p;                  p += 4;
+            record.Body              = new BodyHandle(*(uint*)p);   p += 4;
+            record.PartCount         = *(ushort*)p;                 p += 2;
+            record.MaxCompression    = *(float*)p;                  p += 4;
+            record.MaxCompressionIdx = *(ushort*)p;                 p += 2;
+            record.MaxTension        = *(float*)p;                  p += 4;
+            record.MaxTensionIdx     = *(ushort*)p;                 p += 2;
+            record.MaxShear          = *(float*)p;                  p += 4;
+            record.MaxShearIdx       = *(ushort*)p;                 p += 2;
+            record.MaxTorsion        = *(float*)p;                  p += 4;
+            record.MaxTorsionIdx     = *(ushort*)p;                 p += 2;
+            record.MaxBending        = *(float*)p;                  p += 4;
+            record.MaxBendingIdx     = *(ushort*)p;                 p += 2;
+            record.AccelMag          = *(float*)p;                  p += 4;
+            record.AlphaMag          = *(float*)p;                  p += 4;
             _cursor += kPayload;
         }
 

@@ -57,11 +57,18 @@ enum class RecordType : uint8_t {
     BodyPose          = 64,  // u32 user_id, double3 pos, float4 rot, float3 lin_vel, float3 ang_vel
     ContactReport     = 65,  // u32 user_id_a, u32 user_id_b, double3 point, float3 normal, float depth, float impulse
     RneaSummary       = 66,  // u32 vessel_body_id, u16 part_count,
-                             //   float max_F, u16 max_F_idx, float max_T, u16 max_T_idx,
-                             //   float sum_F, float sum_T,
+                             //   {float max_compression, u16 idx},
+                             //   {float max_tension,     u16 idx},
+                             //   {float max_shear,       u16 idx},
+                             //   {float max_torsion,     u16 idx},
+                             //   {float max_bending,     u16 idx},
                              //   float accel_mag, float alpha_mag
-                             //   Per-vessel summary of the advisory RNEA pass. Phase 4 logs only;
-                             //   Phase 4.1 will use these for break-threshold checks.
+                             //   Per-vessel RNEA summary, decomposed in each joint's reference
+                             //   frame: F_subtree projected onto the joint axis (parent-to-child
+                             //   direction) gives compression / tension; perpendicular gives
+                             //   shear. T_subtree gives torsion / bending the same way. Only
+                             //   tension + shear + torsion + bending are candidates for
+                             //   joint.breakForce / breakTorque comparison; compression is benign.
 };
 
 // Phase 4: cap on parts per vessel for the RNEA pass. Stock KSP allows

@@ -967,22 +967,22 @@ int32_t LongeronWorld::Step(
     //    per-vessel RneaSummary record at ~1 Hz. Phase 4.0 — no
     //    influence on simulation.
     if (mTreeRegistry.RunAdvisoryPass(mPhysicsSystem, mBodyRegistry, mStepCount, dt)) {
-        // 35 bytes per summary: tag(1) + body_id(4) + part_count(2)
-        //   + max_F(4) + max_F_idx(2) + max_T(4) + max_T_idx(2)
-        //   + sum_F(4) + sum_T(4) + accel_mag(4) + alpha_mag(4).
-        constexpr size_t kSize = 35;
+        // 45 bytes per summary: tag(1) + body_id(4) + part_count(2)
+        //   + 5 × {value(4) + idx(2)} for compression / tension /
+        //   shear / torsion / bending = 30
+        //   + accel_mag(4) + alpha_mag(4).
+        constexpr size_t kSize = 45;
         for (const auto& s : mTreeRegistry.GetLastSummaries()) {
             if (!ReserveOutput(kSize)) break;
             uint8_t* p = mOutputBuffer + mOutputLen;
             *p = static_cast<uint8_t>(RecordType::RneaSummary); p += 1;
             Write(p, s.body_id);
             Write(p, s.part_count);
-            Write(p, s.max_F);
-            Write(p, s.max_F_idx);
-            Write(p, s.max_T);
-            Write(p, s.max_T_idx);
-            Write(p, s.sum_F);
-            Write(p, s.sum_T);
+            Write(p, s.max_compression); Write(p, s.max_compression_idx);
+            Write(p, s.max_tension);     Write(p, s.max_tension_idx);
+            Write(p, s.max_shear);       Write(p, s.max_shear_idx);
+            Write(p, s.max_torsion);     Write(p, s.max_torsion_idx);
+            Write(p, s.max_bending);     Write(p, s.max_bending_idx);
             Write(p, s.accel_mag);
             Write(p, s.alpha_mag);
             mOutputLen += kSize;

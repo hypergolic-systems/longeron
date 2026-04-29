@@ -66,15 +66,32 @@ struct VesselTree {
 
 // Per-vessel RNEA pass output. Filled by RunAdvisoryPass each tick;
 // world.cpp drains into the output record stream (RneaSummary).
+//
+// Decomposition convention: per-edge joint axis points from parent
+// CoM toward the child's joint anchor (vessel-body frame). For each
+// edge i:
+//   F_axial = F_subtree[i] · axis    (signed)
+//     > 0 → compression: parts squeezed together (gravity on stack,
+//            ground reaction). Doesn't break joints.
+//     < 0 → tension:    parts pulled apart. THIS is what shears bolts
+//                       / cracks welds — break-detection lives here.
+//   F_shear = ‖F_subtree[i] − F_axial · axis‖   (transverse)
+//   T_torsion = T_subtree[i] · axis              (signed; twisting)
+//   T_bending = ‖T_subtree[i] − T_torsion · axis‖ (perpendicular;
+//             bending moment, e.g. radial decoupler holding a heavy
+//             booster against gravity).
 struct RneaSummary {
     uint32_t body_id;
     uint16_t part_count;
-    float    max_F;       // largest joint force magnitude across all edges
-    uint16_t max_F_idx;   // part index where max_F lives (joint to its parent)
-    float    max_T;
-    uint16_t max_T_idx;
-    float    sum_F;       // sum of joint force magnitudes (rough total stress)
-    float    sum_T;
+
+    // Per-vessel maxima across edges (each with the part index where
+    // it peaks, joint-to-parent).
+    float    max_compression;       uint16_t max_compression_idx;
+    float    max_tension;           uint16_t max_tension_idx;
+    float    max_shear;             uint16_t max_shear_idx;
+    float    max_torsion;           uint16_t max_torsion_idx;
+    float    max_bending;           uint16_t max_bending_idx;
+
     float    accel_mag;   // |a_body| this tick (finite-diff)
     float    alpha_mag;   // |α_body| this tick
 };

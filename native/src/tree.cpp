@@ -270,32 +270,73 @@ bool TreeRegistry::RunAdvisoryPass(
             T_subtree[parent] = T_subtree[parent] + T_subtree[i] + lever.Cross(F_subtree[i]);
         }
 
-        // Per-edge max + sum for a compact summary. Per-edge wrench is
-        // too noisy for a 1Hz log; the C# side can probe specific
-        // edges later if we want them.
-        float max_F = 0.0f, max_T = 0.0f, sum_F = 0.0f, sum_T = 0.0f;
-        uint16_t max_F_idx = 0, max_T_idx = 0;
+        // Per-edge decomposition in the joint's natural frame. Joint
+        // axis = direction from parent CoM toward child's joint anchor
+        // (in vessel-body local frame). For a stack joint this is along
+        // the part's stacking axis; for a radial decoupler it points
+        // sideways. With this:
+        //   F · axis > 0 → compression (squeeze, doesn't break joints)
+        //   F · axis < 0 → tension (pull-apart, this is what shears bolts)
+        //   |F − (F·axis)·axis| → shear (perpendicular)
+        //   T · axis → torsion (twist)
+        //   |T − (T·axis)·axis| → bending (perpendicular moment)
+        //
+        // For breakage detection (Phase 4.x), the compression
+        // component is benign; the rest are candidates for comparison
+        // against joint.breakForce / breakTorque.
+        float max_compression = 0.0f, max_tension = 0.0f, max_shear = 0.0f;
+        float max_torsion = 0.0f, max_bending = 0.0f;
+        uint16_t max_compression_idx = 0, max_tension_idx = 0, max_shear_idx = 0;
+        uint16_t max_torsion_idx = 0, max_bending_idx = 0;
+
         for (uint16_t i = 0; i < tree.nodes.size(); ++i) {
-            if (tree.nodes[i].parent_idx == kInvalidPartIdx) continue;
-            float Fmag = F_subtree[i].Length();
-            float Tmag = T_subtree[i].Length();
-            sum_F += Fmag;
-            sum_T += Tmag;
-            if (Fmag > max_F) { max_F = Fmag; max_F_idx = i; }
-            if (Tmag > max_T) { max_T = Tmag; max_T_idx = i; }
+            uint16_t parent = tree.nodes[i].parent_idx;
+            if (parent == kInvalidPartIdx) continue;
+
+            JPH::Vec3 axis_raw = tree.nodes[i].attach_local - tree.nodes[parent].com_local;
+            float axis_len = axis_raw.Length();
+            // Degenerate (joint anchor coincident with parent CoM): no
+            // well-defined axis, skip the decomposition for this edge.
+            // Phase 4.x will use stock attach-node orientation instead.
+            if (axis_len < 1e-4f) continue;
+            JPH::Vec3 axis = axis_raw / axis_len;
+
+            const JPH::Vec3& F = F_subtree[i];
+            const JPH::Vec3& T = T_subtree[i];
+
+            float f_axial = F.Dot(axis);                    // signed
+            JPH::Vec3 f_perp = F - axis * f_axial;
+            float f_shear = f_perp.Length();
+            float compression = (f_axial > 0.0f) ? f_axial : 0.0f;
+            float tension     = (f_axial < 0.0f) ? -f_axial : 0.0f;
+
+            float t_axial = T.Dot(axis);                    // torsion (signed)
+            JPH::Vec3 t_perp = T - axis * t_axial;
+            float t_torsion_abs = std::fabs(t_axial);
+            float t_bending = t_perp.Length();
+
+            if (compression  > max_compression) { max_compression = compression;  max_compression_idx = i; }
+            if (tension      > max_tension)     { max_tension     = tension;      max_tension_idx     = i; }
+            if (f_shear      > max_shear)       { max_shear       = f_shear;      max_shear_idx       = i; }
+            if (t_torsion_abs > max_torsion)    { max_torsion     = t_torsion_abs; max_torsion_idx    = i; }
+            if (t_bending    > max_bending)     { max_bending     = t_bending;    max_bending_idx     = i; }
         }
 
         RneaSummary s;
-        s.body_id    = body_id;
-        s.part_count = static_cast<uint16_t>(tree.nodes.size());
-        s.max_F      = max_F;
-        s.max_F_idx  = max_F_idx;
-        s.max_T      = max_T;
-        s.max_T_idx  = max_T_idx;
-        s.sum_F      = sum_F;
-        s.sum_T      = sum_T;
-        s.accel_mag  = a_body.Length();
-        s.alpha_mag  = alpha.Length();
+        s.body_id            = body_id;
+        s.part_count         = static_cast<uint16_t>(tree.nodes.size());
+        s.max_compression    = max_compression;
+        s.max_compression_idx = max_compression_idx;
+        s.max_tension        = max_tension;
+        s.max_tension_idx    = max_tension_idx;
+        s.max_shear          = max_shear;
+        s.max_shear_idx      = max_shear_idx;
+        s.max_torsion        = max_torsion;
+        s.max_torsion_idx    = max_torsion_idx;
+        s.max_bending        = max_bending;
+        s.max_bending_idx    = max_bending_idx;
+        s.accel_mag          = a_body.Length();
+        s.alpha_mag          = alpha.Length();
         mLastSummaries.push_back(s);
     }
     return true;

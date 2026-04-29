@@ -123,13 +123,22 @@ namespace Longeron
                             && rneaOwner.Part != null
                             && rneaOwner.Part.vessel != null)
                         {
+                            // Joint forces decomposed in each edge's
+                            // reference frame. Compression is benign
+                            // (gravity loading a stack); tension /
+                            // shear / bending / torsion are the
+                            // break-relevant channels.
                             Debug.Log("[Longeron/rnea] " + string.Format(
-                                "v='{0}' parts={1} |a|={2:F2}m/s² |α|={3:F3}rad/s² " +
-                                "joints: maxF={4:F1}kN@{5} maxT={6:F2}kN·m@{7} sumF={8:F1}kN sumT={9:F2}kN·m",
+                                "v='{0}' parts={1} |a|={2:F2}m/s² |α|={3:F3}rad/s² | " +
+                                "compr={4:F1}kN@{5} tens={6:F1}kN@{7} shear={8:F1}kN@{9} | " +
+                                "tors={10:F2}kN·m@{11} bend={12:F2}kN·m@{13}",
                                 rneaOwner.Part.vessel.vesselName, rnea.PartCount,
                                 rnea.AccelMag, rnea.AlphaMag,
-                                rnea.MaxF, rnea.MaxFIdx, rnea.MaxT, rnea.MaxTIdx,
-                                rnea.SumF, rnea.SumT));
+                                rnea.MaxCompression, rnea.MaxCompressionIdx,
+                                rnea.MaxTension,     rnea.MaxTensionIdx,
+                                rnea.MaxShear,       rnea.MaxShearIdx,
+                                rnea.MaxTorsion,     rnea.MaxTorsionIdx,
+                                rnea.MaxBending,     rnea.MaxBendingIdx));
                         }
                         break;
                     default:
