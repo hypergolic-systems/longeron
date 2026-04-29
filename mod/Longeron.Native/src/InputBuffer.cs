@@ -454,14 +454,19 @@ namespace Longeron.Native
         /// <summary>
         /// Apply a force at a specific world-space point on the body
         /// (CB-frame coords). Native side computes the implicit torque
-        /// from (point - body_CoM) × force. Layout: tag(1) + body_id(4)
-        /// + force(double3=24) + point(double3=24) = 53 bytes.
+        /// from (point - body_CoM) × force. <paramref name="partIdx"/>
+        /// tags the force with the originating part's RNEA tree index
+        /// so Phase 4 can subtract per-part external wrenches; pass
+        /// <c>0xFFFF</c> for unattributed (static / non-tree) sources.
+        /// Layout: tag(1) + body_id(4) + force(double3=24) +
+        /// point(double3=24) + part_idx(2) = 55 bytes.
         /// </summary>
         public void WriteForceAtPosition(BodyHandle body,
                                          double fx, double fy, double fz,
-                                         double px, double py, double pz)
+                                         double px, double py, double pz,
+                                         ushort partIdx = 0xFFFF)
         {
-            const int kSize = 53;
+            const int kSize = 55;
             EnsureCapacity(kSize);
             byte* p = _ptr + _len;
             *p++ = (byte)RecordType.ForceAtPosition;
@@ -472,6 +477,7 @@ namespace Longeron.Native
             *(double*)p = px;               p += 8;
             *(double*)p = py;               p += 8;
             *(double*)p = pz;               p += 8;
+            *(ushort*)p = partIdx;          p += 2;
             _len += kSize;
         }
 

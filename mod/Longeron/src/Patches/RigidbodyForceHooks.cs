@@ -79,7 +79,8 @@ namespace Longeron.Patches
             LongeronAddon.ActiveWorld.Input.WriteForceAtPosition(
                 jb.Handle,
                 fCb.x, fCb.y, fCb.z,
-                pCb.x, pCb.y, pCb.z);
+                pCb.x, pCb.y, pCb.z,
+                partIdx: jb.PartIdx);
             return true;
         }
 

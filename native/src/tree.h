@@ -48,6 +48,20 @@ struct PartNode {
 struct VesselTree {
     uint32_t              body_id;     // user_id of the Jolt vessel body
     std::vector<PartNode> nodes;
+
+    // Per-part external-wrench accumulator. Summed by
+    // AccumulateExternalForce as input ForceAtPosition records arrive,
+    // drained + cleared at each emit by RunAdvisoryPass.
+    //   ext_force[i]  — sum of force vectors applied to part i this
+    //                   window, in vessel-body local axes (kN units,
+    //                   stock convention).
+    //   ext_torque[i] — sum of (P_local - com_local) × F_local, the
+    //                   component of torque about each part's CoM
+    //                   contributed by lever-arm forces.
+    // Tick count over the window is tracked by TreeRegistry so we can
+    // average force values back from impulse-style sums if needed.
+    std::vector<JPH::Vec3> ext_force;
+    std::vector<JPH::Vec3> ext_torque;
 };
 
 // Per-vessel RNEA pass output. Filled by RunAdvisoryPass each tick;
@@ -73,6 +87,15 @@ public:
 
     // Drop a vessel's tree (called on BodyDestroy).
     void Erase(uint32_t body_id);
+
+    // Add an external force record into the per-part accumulator for
+    // RNEA subtraction. World-frame force + point are converted to
+    // body-local axes using the body's current CoM position + rotation.
+    // No-op when the vessel has no tree or part_idx is out of range.
+    void AccumulateExternalForce(
+        uint32_t body_id, uint16_t part_idx,
+        JPH::Vec3 force_world, JPH::RVec3 point_world,
+        JPH::RVec3 body_com_world, JPH::Quat body_rot);
 
     // Run RNEA for every tree using current Jolt state. Fills the
     // mLastSummaries vector with one entry per vessel (only when the

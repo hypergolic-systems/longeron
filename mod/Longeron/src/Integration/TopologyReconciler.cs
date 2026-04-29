@@ -241,6 +241,15 @@ namespace Longeron.Integration
                 var p = _bfsScratch[i];
                 ref var node = ref _treeNodeScratch[i];
 
+                // Stamp the per-part index on the JoltBody so
+                // RigidbodyForceHooks can attribute force records
+                // back to this position in the tree.
+                if (p.gameObject != null)
+                {
+                    var jbStamp = p.gameObject.GetComponent<JoltBody>();
+                    if (jbStamp != null) jbStamp.PartIdx = (ushort)i;
+                }
+
                 // Parent index in the BFS order. Root has no parent.
                 if (i == 0 || p.parent == null || !_idxScratch.TryGetValue(p.parent, out var parentIdx))
                     node.ParentIdx = kInvalidIdx;
@@ -255,21 +264,19 @@ namespace Longeron.Integration
                 node.ComLocalY = comLocal.y;
                 node.ComLocalZ = comLocal.z;
 
-                // Inertia: uniform-density solid box from collider AABB
-                // bounds. I_x = (1/12) m (b² + c²) along principal axes.
-                // The bounds are world-axis-aligned; project into vessel-
-                // root frame via the part's rotation. Crude but proportional
-                // to actual mass distribution; Phase 4.1 reads true tensors
-                // from Part fields when available.
-                Vector3 ext = ApproxAABBHalfExtents(p);
-                float bx = ext.x, by = ext.y, bz = ext.z;
-                // (1/3) m (b² + c²) for half-extents — same as (1/12) m * (2b)² + (2c)² distributed.
-                float ix = (node.Mass / 3f) * (by * by + bz * bz);
-                float iy = (node.Mass / 3f) * (bx * bx + bz * bz);
-                float iz = (node.Mass / 3f) * (bx * bx + by * by);
-                node.InertiaDiagX = ix;
-                node.InertiaDiagY = iy;
-                node.InertiaDiagZ = iz;
+                // Inertia: prefer the rb's principal moments
+                // (Unity computes these from collider geometry +
+                // density when the rb is created). For kinematic
+                // rbs that haven't been initialized non-kinematic
+                // first, this can return Vector3.zero — fall back
+                // to a uniform-density box from collider AABBs.
+                //
+                // Project the principal moments onto vessel-root
+                // axes via the part's relative rotation. We only
+                // store the diagonal (Phase 4 advisory); the
+                // off-diagonal terms are dropped.
+                ComputePartInertiaDiag(p, rootXform, node.Mass,
+                    out node.InertiaDiagX, out node.InertiaDiagY, out node.InertiaDiagZ);
 
                 // Joint anchor in vessel-root frame. For child parts,
                 // use the part's attachJoint anchor if available; else
@@ -307,6 +314,66 @@ namespace Longeron.Integration
             var slice = new InputBuffer.VesselTreeNode[n];
             System.Array.Copy(_treeNodeScratch, slice, n);
             input.WriteVesselTreeUpdate(vesselBody, slice);
+        }
+
+        // Inertia tensor for the part's RNEA contribution. We want
+        // the diagonal in vessel-root axes. Unity exposes principal
+        // moments (rb.inertiaTensor) in part-local axes plus a
+        // rotation (rb.inertiaTensorRotation) from those principal
+        // axes to part-local. Compose with the part-to-root rotation,
+        // then take the diagonal of R · diag(I) · R^T:
+        //   I_root_kk = Σ_j (R_kj)² · I_j
+        // (Off-diagonals discarded — Phase 4 wire format only carries
+        // the diagonal. Good enough for advisory magnitudes; Phase 4.x
+        // can extend to a full symmetric tensor.)
+        static void ComputePartInertiaDiag(
+            Part p, Transform rootXform, float mass,
+            out float ix, out float iy, out float iz)
+        {
+            Vector3 principal = Vector3.zero;
+            Quaternion principalToPartLocal = Quaternion.identity;
+            bool haveTensor = false;
+
+            if (p.rb != null)
+            {
+                var t = p.rb.inertiaTensor;
+                // For kinematic-from-creation rbs Unity sometimes
+                // hands back a near-zero tensor. Treat anything
+                // smaller than ~1e-7 as missing and fall back.
+                if (t.x > 1e-7f || t.y > 1e-7f || t.z > 1e-7f)
+                {
+                    principal = t;
+                    principalToPartLocal = p.rb.inertiaTensorRotation;
+                    haveTensor = true;
+                }
+            }
+
+            if (!haveTensor)
+            {
+                // AABB box fallback: solid uniform-density box from
+                // collider AABB half-extents. I = m·(b²+c²)/3 along
+                // each axis (matches stock for parts with no explicit
+                // rb-side tensor — typically jointless flora).
+                Vector3 ext = ApproxAABBHalfExtents(p);
+                float bx = ext.x, by = ext.y, bz = ext.z;
+                ix = (mass / 3f) * (by * by + bz * bz);
+                iy = (mass / 3f) * (bx * bx + bz * bz);
+                iz = (mass / 3f) * (bx * bx + by * by);
+                return;
+            }
+
+            // Compose: principal axes → part-local → vessel-root.
+            Quaternion partToRoot = Quaternion.Inverse(rootXform.rotation) * p.transform.rotation;
+            Quaternion principalToRoot = partToRoot * principalToPartLocal;
+
+            // Build the 3 column basis of principalToRoot, then the
+            // diagonal of R · diag(I) · R^T per-axis.
+            Vector3 cx = principalToRoot * Vector3.right;
+            Vector3 cy = principalToRoot * Vector3.up;
+            Vector3 cz = principalToRoot * Vector3.forward;
+            ix = cx.x * cx.x * principal.x + cy.x * cy.x * principal.y + cz.x * cz.x * principal.z;
+            iy = cx.y * cx.y * principal.x + cy.y * cy.y * principal.y + cz.y * cz.y * principal.z;
+            iz = cx.z * cx.z * principal.x + cy.z * cy.z * principal.y + cz.z * cz.z * principal.z;
         }
 
         static Vector3 ApproxAABBHalfExtents(Part p)

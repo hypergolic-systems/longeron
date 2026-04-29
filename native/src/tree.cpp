@@ -21,10 +21,44 @@ void TreeRegistry::Upsert(uint32_t body_id, std::vector<PartNode>&& nodes) {
     VesselTree& t = mTrees[body_id];
     t.body_id = body_id;
     t.nodes   = std::move(nodes);
+    // Re-size accumulator to match the new node count and zero it.
+    // Topology change implies a fresh accounting window.
+    t.ext_force.assign(t.nodes.size(), JPH::Vec3::sZero());
+    t.ext_torque.assign(t.nodes.size(), JPH::Vec3::sZero());
 }
 
 void TreeRegistry::Erase(uint32_t body_id) {
     mTrees.erase(body_id);
+}
+
+void TreeRegistry::AccumulateExternalForce(
+    uint32_t body_id, uint16_t part_idx,
+    JPH::Vec3 force_world, JPH::RVec3 point_world,
+    JPH::RVec3 body_com_world, JPH::Quat body_rot)
+{
+    auto it = mTrees.find(body_id);
+    if (it == mTrees.end()) return;
+    VesselTree& t = it->second;
+    if (part_idx >= t.nodes.size()) return;
+
+    // Transform the world force + application point into body-local
+    // axes. Forces are float-precision; positions cross the double→
+    // float boundary safely once we've subtracted the body CoM (the
+    // result is small — meters within the vessel).
+    JPH::Quat body_rot_inv = body_rot.Conjugated();
+    JPH::Vec3 force_local  = body_rot_inv * force_world;
+    JPH::RVec3 P_rel       = point_world - body_com_world;
+    JPH::Vec3 P_rel_f(
+        static_cast<float>(P_rel.GetX()),
+        static_cast<float>(P_rel.GetY()),
+        static_cast<float>(P_rel.GetZ()));
+    JPH::Vec3 P_local = body_rot_inv * P_rel_f;
+
+    // Lever from part CoM to the application point.
+    JPH::Vec3 lever_local = P_local - t.nodes[part_idx].com_local;
+
+    t.ext_force[part_idx]  = t.ext_force[part_idx]  + force_local;
+    t.ext_torque[part_idx] = t.ext_torque[part_idx] + lever_local.Cross(force_local);
 }
 
 namespace {
@@ -139,9 +173,26 @@ bool TreeRegistry::RunAdvisoryPass(
         s_prev_lin_v[body_id] = v_body;
         s_prev_ang_v[body_id] = omega;
 
-        if (tree.nodes.size() < 2) continue;  // single-part vessels have no joints
+        if (tree.nodes.size() < 2) {
+            // Single-part vessels have no joints; clear the accumulator
+            // to avoid stale carry-over and skip.
+            std::fill(tree.ext_force.begin(),  tree.ext_force.end(),  JPH::Vec3::sZero());
+            std::fill(tree.ext_torque.begin(), tree.ext_torque.end(), JPH::Vec3::sZero());
+            continue;
+        }
 
-        // Compute per-part inertial wrench at each part's CoM.
+        // Per-part NET wrench: inertial requirement minus the average
+        // external wrench applied across the window. F_self[i] = m × a_part
+        // − F_ext_avg(i). Hooke's law for the joint: this is what the
+        // joints have to transmit to keep the part following the
+        // observed motion given the externals we know about. With
+        // gravity + thrust + drag all routed via Harmony into our
+        // per-part accumulator, F_self should approach zero on a
+        // cruising stable vessel and grow on a tumbling / impacting one.
+        const uint64_t window_ticks = (step_count > prev_emit_step)
+            ? (step_count - prev_emit_step) : 1;
+        const float inv_ticks = 1.0f / static_cast<float>(window_ticks);
+
         std::vector<JPH::Vec3> F_self(tree.nodes.size(), JPH::Vec3::sZero());
         std::vector<JPH::Vec3> T_self(tree.nodes.size(), JPH::Vec3::sZero());
         for (size_t i = 0; i < tree.nodes.size(); ++i) {
@@ -149,9 +200,15 @@ bool TreeRegistry::RunAdvisoryPass(
             PartInertialWrench w = InertialWrench(
                 n.com_local, n.mass, n.inertia_diag,
                 v_body, omega, a_body, alpha);
-            F_self[i] = w.force;
-            T_self[i] = w.torque;
+            // Average external wrench over the window:
+            JPH::Vec3 ext_F_avg = tree.ext_force[i]  * inv_ticks;
+            JPH::Vec3 ext_T_avg = tree.ext_torque[i] * inv_ticks;
+            F_self[i] = w.force  - ext_F_avg;
+            T_self[i] = w.torque - ext_T_avg;
         }
+        // Drain accumulator for the next window.
+        std::fill(tree.ext_force.begin(),  tree.ext_force.end(),  JPH::Vec3::sZero());
+        std::fill(tree.ext_torque.begin(), tree.ext_torque.end(), JPH::Vec3::sZero());
 
         // Backward (leaf → root) accumulation. Joint wrench at part i =
         // sum of (force, torque-translated-to-parent's-attach) over the

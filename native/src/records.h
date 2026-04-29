@@ -34,11 +34,14 @@ enum class RecordType : uint8_t {
                                    //   anchor (KSP attach-node position in CB-frame coords) — better
                                    //   PGS conditioning than mAutoDetectPoint=true. (Phase 2 multi-
                                    //   body experiment; left here for inter-vessel future use.)
-    ForceAtPosition   = 12,  // u32 user_id, double3 force, double3 point_world
+    ForceAtPosition   = 12,  // u32 user_id, double3 force, double3 point_world, u16 part_idx
                              //   Apply force at a specific CB-frame world point on the body. Native
                              //   side computes (point - body_CoM) × force as the implicit torque.
                              //   Used by the single-body-per-vessel model: every part's AddForce
                              //   redirects to the vessel body at the part's CoM-or-attach-point.
+                             //   part_idx tags the force with the originating part's tree index
+                             //   (0xFFFF = unattributed) so Phase 4 RNEA can subtract the per-part
+                             //   external wrench from the inertial wrench.
     VesselTreeUpdate  = 13,  // u32 vessel_body_id, u16 part_count,
                              //   part_count × {
                              //     u16 parent_idx (0xFFFF = root), float mass,

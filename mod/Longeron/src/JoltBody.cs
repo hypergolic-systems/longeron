@@ -56,6 +56,15 @@ namespace Longeron
         // not per-part).
         public float LastMass;
 
+        // Index into the vessel's Phase 4 RNEA tree. Stamped during
+        // TopologyReconciler.EmitVesselTree's BFS walk. Used by the
+        // force-redirect Harmony hook to attribute each force record
+        // to the originating part so the native side can subtract
+        // external wrenches per part during the RNEA pass.
+        // 0xFFFF = unattributed (force was applied to a part the
+        // tree doesn't track, e.g. a vessel without a sent tree).
+        public ushort PartIdx = 0xFFFF;
+
         // Pending body destroys from GameObjects Unity has destroyed
         // since the last drain. Static so the queue survives even when
         // a JoltBody's component is gone — the queue is keyed by
@@ -90,6 +99,9 @@ namespace Longeron
             jb.Handle = handle;
             jb.Part = part;
             jb.OwnsBody = ownsBody;
+            // Reset to unattributed; EmitVesselTree restamps with the
+            // correct index immediately after attach.
+            jb.PartIdx = 0xFFFF;
             if (ownsBody) _byHandle[handle.Id] = jb;
             return jb;
         }

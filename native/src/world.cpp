@@ -817,6 +817,7 @@ void LongeronWorld::HandleForceAtPosition(const uint8_t*& cur, const uint8_t* en
         static_cast<float>(Read<double>(cur, end)),
         static_cast<float>(Read<double>(cur, end)));
     const JPH::RVec3 point = ReadDouble3(cur, end);
+    const uint16_t  part_idx = Read<uint16_t>(cur, end);
 
     auto it = mBodyRegistry.find(user_id);
     if (it == mBodyRegistry.end()) return;
@@ -825,6 +826,22 @@ void LongeronWorld::HandleForceAtPosition(const uint8_t*& cur, const uint8_t* en
     // the implicit torque (point - CoM) × force internally.
     JPH::BodyInterface& bi = mPhysicsSystem.GetBodyInterface();
     bi.AddForce(it->second, force, point);
+
+    // Phase 4: route the force to the per-part external-wrench
+    // accumulator so RNEA can subtract it from the inertial wrench
+    // when computing per-edge transmitted force. Skip if part_idx
+    // is unattributed (0xFFFF) or the body has no tree (static
+    // bodies, single-part vessels we haven't sent a tree for, etc.).
+    if (part_idx != kInvalidPartIdx) {
+        const JPH::BodyLockInterfaceNoLock& lock = mPhysicsSystem.GetBodyLockInterfaceNoLock();
+        const JPH::Body* body = lock.TryGetBody(it->second);
+        if (body != nullptr) {
+            mTreeRegistry.AccumulateExternalForce(
+                user_id, part_idx, force, point,
+                body->GetCenterOfMassPosition(),
+                body->GetRotation());
+        }
+    }
 }
 
 // --------------------------------------------------------------------
