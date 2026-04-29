@@ -25,19 +25,15 @@ namespace Longeron.Integration
         public int LastVertexCount;
         public int LastTriangleCount;
 
-        // Unity-world position of `Quad.transform` when we last
-        // baked the Jolt mesh. PQS independently translates quad
-        // transforms via `FastUpdateSubQuadsPosition` (driven by
-        // `CelestialBody.position` setter on every Planetarium
-        // tick) — that's a translation our Jolt mesh doesn't
-        // see, so per-tick drift accumulates. Streamer.UpdateActive
-        // compares this against the current transform.position
-        // and re-mirrors when the delta exceeds a threshold.
-        public Vector3 BakedWorldPosition;
+        // CB-frame position of the quad at mirror time, captured for
+        // diagnostic comparison against a fresh frame.WorldToCb
+        // computation. With the frame redesign, the Jolt body sits at
+        // this CB-frame position permanently — drift in Unity world
+        // (planet rotation, orbital motion) doesn't move it.
+        public Vector3d BakedCbPosition;
 
-        // Used by Streamer.UpdateActive to walk the live set
-        // without an extra dict lookup. Maintained in
-        // AttachTo / OnDestroy.
+        // Used to walk the live set for diagnostic traversal and SOI-
+        // change cleanup. Maintained in AttachTo / OnDestroy.
         internal static readonly List<QuadBody> Active =
             new List<QuadBody>();
 

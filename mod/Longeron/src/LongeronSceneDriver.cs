@@ -45,24 +45,35 @@ namespace Longeron
             float dt = Time.fixedDeltaTime;
             if (dt <= 0f) return;
 
+            // Phase 3b: anchor Jolt to the active vessel's mainBody-fixed
+            // frame. Every bridge write goes through CbFrame.WorldToCb;
+            // every read through CbToWorld. CB-frame is rotating and
+            // translating in Unity world, but stationary in itself —
+            // terrain doesn't drift, landed vessels don't slide,
+            // FloatingOrigin / Krakensbane / planet rotation all fall
+            // out of the boundary transform.
+            var frame = CbFrame.Current();
+            if (!frame.IsValid)
+            {
+                Debug.LogWarning(LogPrefix + "no active CelestialBody for frame; skipping tick");
+                return;
+            }
+
             // Topology mutations queued during the prior frame
             // (decouple, couple, dock, joint break, vessel destroy)
             // and any pending body destroys from JoltBody.OnDestroy
             // get reconciled into the bridge first, before per-tick
             // pose / force records ride the same input buffer.
-            TopologyReconciler.Reconcile(world.Input);
+            TopologyReconciler.Reconcile(world.Input, frame);
 
-            // Phase 3b: re-mirror PQS terrain quads whose Unity-side
-            // transforms have drifted from where we last baked them.
-            // CelestialBody position changes propagate through PQS
-            // independently of FloatingOrigin, so static Jolt mesh
-            // bodies need a periodic refresh.
-            Streamer.UpdateActive();
+            // Diagnostic raycast (1 Hz): vessel → terrain, log Jolt /
+            // Unity agreement. Useful for verifying the CB-frame mirror
+            // is consistent with stock visual terrain.
             Streamer.LogVesselTerrainDiag();
 
             // Spawn the synthetic ground once we have a vessel anchor.
             if (!_groundSpawned)
-                TrySpawnSyntheticGround(world);
+                TrySpawnSyntheticGround(world, frame);
 
             // Per-vessel pre-step setup.
             foreach (var mv in SceneRegistry.Vessels)
@@ -104,7 +115,7 @@ namespace Longeron
                         world.Output.ReadBodyPose(out var pose);
                         if (JoltBody.TryGet(pose.Body.Id, out var jb)
                             && jb.Part != null && jb.Part.rb != null)
-                            ApplyPoseToRigidbody(jb.Part.rb, pose);
+                            ApplyPoseToRigidbody(jb.Part.rb, pose, frame);
                         break;
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out _);
@@ -152,36 +163,41 @@ namespace Longeron
             }
         }
 
-        // Apply Jolt's integrated pose + velocity to a Unity Rigidbody.
+        // Apply Jolt's integrated CB-frame pose + velocity to a Unity
+        // Rigidbody.
         //
-        // Velocity convention: Jolt integrates in absolute world coords
-        // (V_abs). Stock KSP expects rb.velocity to be the
-        // *Krakensbane-adjusted* velocity (V_abs − FrameVel), so that
-        // velocityD = rb.velocity + FrameVel = V_abs round-trips. We
-        // subtract FrameVel here.
+        // Pose record is in CB-fixed (rotating) frame. Convert through
+        // the boundary transform to Unity world coordinates before
+        // writing rb.{position,rotation,velocity,angularVelocity}.
         //
-        // Why this matters: if we wrote V_abs into rb.velocity, then on
-        // every tick where speed > MaxV, Krakensbane would drain
-        // rb_velocityD (= V_abs) into FrameVel, but Jolt has no notion
-        // of FrameVel and would re-emit V_abs next tick — FrameVel
-        // grows by V_abs every tick → runaway acceleration → vessel
-        // explodes from thermal damage. Subtracting FrameVel here makes
-        // Krakensbane's drain idempotent: at steady state rb.velocity
-        // ≈ 0, FrameVel holds the orbital velocity, no further excess.
+        // Velocity convention: CbVelToWorld(v_cb, p) returns the
+        // Krakensbane-adjusted Unity-world velocity — V_inertial − FrameVel
+        // (with FrameVel ≡ 0 once Krakensbane is patched out in Step 2).
+        // Subsequent stock reads through velocityD = rb.velocity +
+        // FrameVel recover V_inertial.
         //
         // The setter goes through Patch_Rigidbody_SetVelocity into
-        // JoltBody.LastVelocity, so subsequent stock reads return the
-        // adjusted velocity too. JoltBody.LastVelocity here stores
-        // *adjusted*, not absolute — RefreshVesselVelocityFields adds
-        // FrameVel back when computing velocityD.
-        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose)
+        // JoltBody.LastVelocity, so RefreshVesselVelocityFields can
+        // reconstruct vessel-level fields from the same Krakensbane-
+        // adjusted Unity velocity.
+        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose, CbFrame frame)
         {
-            Vector3 frameVel = Krakensbane.GetFrameVelocityV3f();
-            Vector3 vAbs = new Vector3(pose.LinX, pose.LinY, pose.LinZ);
-            rb.position = new Vector3((float)pose.PosX, (float)pose.PosY, (float)pose.PosZ);
-            rb.rotation = new Quaternion(pose.RotX, pose.RotY, pose.RotZ, pose.RotW);
-            rb.velocity = vAbs - frameVel;
-            rb.angularVelocity = new Vector3(pose.AngX, pose.AngY, pose.AngZ);
+            Vector3d posCb = new Vector3d(pose.PosX, pose.PosY, pose.PosZ);
+            Vector3d posWorld = frame.CbToWorld(posCb);
+
+            QuaternionD rotCb = new QuaternionD(pose.RotX, pose.RotY, pose.RotZ, pose.RotW);
+            QuaternionD rotWorld = frame.CbToWorld(rotCb);
+
+            Vector3d velCb = new Vector3d(pose.LinX, pose.LinY, pose.LinZ);
+            Vector3d velWorld = frame.CbVelToWorld(velCb, posWorld);
+
+            Vector3d angCb = new Vector3d(pose.AngX, pose.AngY, pose.AngZ);
+            Vector3d angWorld = frame.CbAngVelToWorld(angCb);
+
+            rb.position        = (Vector3)posWorld;
+            rb.rotation        = (Quaternion)rotWorld;
+            rb.velocity        = (Vector3)velWorld;
+            rb.angularVelocity = (Vector3)angWorld;
         }
 
 
@@ -201,14 +217,20 @@ namespace Longeron
             if (v.rootPart == null || v.rootPart.rb == null) return;
             if (v.orbit == null || v.mainBody == null) return;
 
-            // Read velocity from JoltBody directly rather than through
-            // rb.velocity. Why: Harmony postfixes on Unity's
-            // extern Rigidbody.get_velocity property aren't always
+            // Read velocity from JoltBody rather than rb.velocity:
+            // Harmony postfixes on extern get_velocity aren't always
             // honored under Mono, so rb.velocity may still return 0 for
-            // kinematic bodies. JoltBody.LastVelocity is what we wrote
-            // in ApplyPoseToRigidbody — it's the Krakensbane-adjusted
-            // velocity (V_abs − FrameVel). velocityD = adjusted +
-            // FrameVel = V_abs round-trips back to absolute.
+            // kinematic bodies. JoltBody.LastVelocity reflects what
+            // ApplyPoseToRigidbody set on rb.velocity.
+            //
+            // With Krakensbane patched out (FrameVel ≡ 0):
+            //   rb.velocity     == inertial Unity-world velocity
+            //   velocityD       == rb.velocity (stock formula reduces)
+            //   obt_velocity    == velocityD (orbital == inertial)
+            //   srf_velocity    == velocityD − ω×r at part position
+            // Stock derives srf/obt via the orbit (Vessel.cs:3530); we
+            // shortcut from rb.velocity since the orbit isn't always
+            // current at our +10000 execution order.
             var rootRb = v.rootPart.rb;
             var rootJb = rootRb.GetComponent<JoltBody>();
             Vector3d rbVel = rootJb != null
@@ -216,15 +238,11 @@ namespace Longeron
                 : (Vector3d)rootRb.velocity;
             v.rb_velocity = (Vector3)rbVel;
             v.rb_velocityD = rbVel;
-            v.velocityD = rbVel + Krakensbane.GetFrameVelocity();
+            v.velocityD = rbVel;
 
-            // srf_velocity = velocityD itself (rotating-frame motion).
-            // obt_velocity = inertial-frame velocity = surface motion +
-            // body's surface rotation at our position.
-            // Both formulas via Kraken (~/dev/hgs2/mod/KrakenClient.cs:368).
             Vector3d rotVelAtCoM = v.mainBody.getRFrmVel(v.CoMD);
-            v.srf_velocity = v.velocityD;
-            v.obt_velocity = v.velocityD + rotVelAtCoM;
+            v.obt_velocity = v.velocityD;
+            v.srf_velocity = v.velocityD - rotVelAtCoM;
             v.obt_speed = v.obt_velocity.magnitude;
             v.upAxis = (v.CoMD - v.mainBody.position).normalized;
             v.verticalSpeed = Vector3d.Dot(v.srf_velocity, v.upAxis);
@@ -262,8 +280,15 @@ namespace Longeron
         // axes are absolute Kerbin-centric coords. So we anchor
         // everything in the gravity vector, not Unity Y.
         //
-        // Phase 3 replaces this with PQS streaming.
-        void TrySpawnSyntheticGround(World world)
+        // Phase 3b replaces this with PQS streaming, but keep the
+        // synthetic ground until launchpad geometry capture is wired
+        // up (the launchpad itself isn't PQS — it's a PQSCity static
+        // prefab that we don't yet mirror).
+        //
+        // Compute pose in Unity world (using the live anchor / gravity
+        // vector), then convert to CB-frame at submission time so the
+        // body stays put in CB-frame as the planet rotates beneath it.
+        void TrySpawnSyntheticGround(World world, CbFrame frame)
         {
             // Pick the active vessel (or the first registered) as the
             // gravity reference point — gravity varies with position,
@@ -337,18 +362,25 @@ namespace Longeron
             // the world's gravity-up direction.
             Quaternion groundRot = Quaternion.FromToRotation(Vector3.up, upDir);
 
+            // Convert Unity-world pose → CB-frame for submission. The
+            // box stays anchored to its lat/lon/alt as the planet
+            // rotates because Jolt holds it in the rotating frame.
+            Vector3d centerCb = frame.WorldToCb(new Vector3d(groundCenter.x, groundCenter.y, groundCenter.z));
+            QuaternionD rotCb = frame.WorldToCb((QuaternionD)groundRot);
+
             world.Input.WriteBodyCreateBox(
                 new BodyHandle(SceneRegistry.SyntheticGroundBodyId),
                 BodyType.Static, Layer.Static,
                 halfX: 25f, halfY: kHalfY, halfZ: 25f,
-                posX: groundCenter.x, posY: groundCenter.y, posZ: groundCenter.z,
-                rotX: groundRot.x, rotY: groundRot.y, rotZ: groundRot.z, rotW: groundRot.w,
+                posX: centerCb.x, posY: centerCb.y, posZ: centerCb.z,
+                rotX: (float)rotCb.x, rotY: (float)rotCb.y, rotZ: (float)rotCb.z, rotW: (float)rotCb.w,
                 mass: 0f);
 
             _groundSpawned = true;
             Debug.Log(LogPrefix + string.Format(
-                "synthetic ground spawned: center=({0:F2},{1:F2},{2:F2}) up=({3:F2},{4:F2},{5:F2}) lowestProj={6:F2} — vessel '{7}'",
+                "synthetic ground spawned: world=({0:F2},{1:F2},{2:F2}) cb=({3:F2},{4:F2},{5:F2}) up=({6:F2},{7:F2},{8:F2}) lowestProj={9:F2} — vessel '{10}'",
                 groundCenter.x, groundCenter.y, groundCenter.z,
+                centerCb.x, centerCb.y, centerCb.z,
                 upDir.x, upDir.y, upDir.z,
                 lowestProj,
                 anchorVessel.vesselName));

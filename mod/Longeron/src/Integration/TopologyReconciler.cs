@@ -46,7 +46,10 @@ namespace Longeron.Integration
         // LongeronSceneDriver.FixedUpdate before per-vessel pre-step
         // setup so all topology mutations land in the same input
         // buffer as the per-tick pose / force records.
-        public static void Reconcile(InputBuffer input)
+        //
+        // CbFrame is passed through to ColliderWalker so part poses
+        // get baked in CB-frame coords before submission.
+        public static void Reconcile(InputBuffer input, CbFrame frame)
         {
             JoltBody.DrainPendingDestroys(input);
 
@@ -59,10 +62,10 @@ namespace Longeron.Integration
             var pending = new List<Vessel>(_dirty);
             _dirty.Clear();
 
-            foreach (var v in pending) ReconcileVessel(v, input);
+            foreach (var v in pending) ReconcileVessel(v, input, frame);
         }
 
-        static void ReconcileVessel(Vessel v, InputBuffer input)
+        static void ReconcileVessel(Vessel v, InputBuffer input, CbFrame frame)
         {
             // End-of-life: vessel is dead or fully destroyed. Tear down
             // any bodies/constraints we held for it.
@@ -137,7 +140,8 @@ namespace Longeron.Integration
                     bool ok = ColliderWalker.WriteBodyFor(
                         input, handle, part,
                         BodyType.Dynamic, Layer.Kinematic, mass,
-                        groupId: mv.GroupId);
+                        groupId: mv.GroupId,
+                        frame: frame);
                     if (!ok) continue;
 
                     mv.AddBody(part, handle);

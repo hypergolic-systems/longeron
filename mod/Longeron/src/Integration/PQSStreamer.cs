@@ -226,6 +226,9 @@ namespace Longeron.Integration
             var world = LongeronAddon.ActiveWorld;
             if (world == null) return false;
 
+            var frame = CbFrame.Current();
+            if (!frame.IsValid) return false;
+
             var mc = quad.gameObject.GetComponent<MeshCollider>();
             if (mc == null || mc.sharedMesh == null) return false;
 
@@ -234,21 +237,31 @@ namespace Longeron.Integration
             var triangles  = mesh.triangles;
             if (localVerts.Length == 0 || triangles.Length == 0) return false;
 
-            // Bake quad-local vertices to Unity-world space at the
-            // current transform. We pass world-space verts with body
-            // pos = (0,0,0) rather than tracking per-quad transforms
-            // on the native side; Krakensbane / FloatingOrigin shifts
-            // already translate every Jolt body uniformly via
-            // WriteShiftWorld, so terrain stays in lockstep with
-            // vessels.
+            // Mirror in CB-frame coords: body pose = quad's CB-frame
+            // pose, vertices = mesh-local (small magnitudes — quad is
+            // typically < 1 km wide, so float precision is fine).
+            //
+            // Stock quad-local mesh data is already what we want; no
+            // baking needed. We just compute the body's CB-frame pose
+            // from the quad's Unity transform.
+            //
+            // Mesh vertices include the quad's local scale through the
+            // transform — `lossyScale`. For stock PQS quads scale is
+            // (1,1,1), but if anyone introduces scaled quads we'd need
+            // to bake scale into vertices. For now, assume identity
+            // scale (asserted-by-convention; could add a check).
             var xform = quad.transform;
-            var worldXyz = new float[localVerts.Length * 3];
-            for (int i = 0; i < localVerts.Length; ++i)
+            Vector3d posCb = frame.WorldToCb(new Vector3d(
+                xform.position.x, xform.position.y, xform.position.z));
+            QuaternionD rotCb = frame.WorldToCb((QuaternionD)xform.rotation);
+
+            int n = localVerts.Length;
+            var packed = new float[n * 3];
+            for (int i = 0; i < n; ++i)
             {
-                Vector3 w = xform.TransformPoint(localVerts[i]);
-                worldXyz[i * 3 + 0] = w.x;
-                worldXyz[i * 3 + 1] = w.y;
-                worldXyz[i * 3 + 2] = w.z;
+                packed[i * 3 + 0] = localVerts[i].x;
+                packed[i * 3 + 1] = localVerts[i].y;
+                packed[i * 3 + 2] = localVerts[i].z;
             }
 
             var handle = SceneRegistry.MintBodyHandle();
@@ -256,9 +269,10 @@ namespace Longeron.Integration
             {
                 world.Input.WriteBodyCreateTriangleMesh(
                     handle, Layer.Static,
-                    worldXyz, triangles,
-                    posX: 0, posY: 0, posZ: 0,
-                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    packed, triangles,
+                    posX: posCb.x, posY: posCb.y, posZ: posCb.z,
+                    rotX: (float)rotCb.x, rotY: (float)rotCb.y,
+                    rotZ: (float)rotCb.z, rotW: (float)rotCb.w,
                     groupId: 0);
             }
             catch (Exception ex)
@@ -271,73 +285,11 @@ namespace Longeron.Integration
             var qb = QuadBody.AttachTo(quad, handle);
             if (qb != null)
             {
-                qb.LastVertexCount = localVerts.Length;
+                qb.LastVertexCount = n;
                 qb.LastTriangleCount = triangles.Length / 3;
-                qb.BakedWorldPosition = xform.position;
+                qb.BakedCbPosition = posCb;
             }
             return true;
-        }
-
-        // Threshold (m) above which a drifted quad gets re-mirrored.
-        // PQS independently translates quad transforms each tick via
-        // CelestialBody.position → PQS.PrecisePosition setter →
-        // FastUpdateQuadsPosition (PQS.cs:1261) → FastUpdateSubQuadsPosition
-        // (PQ.cs:272). That path bypasses FloatingOrigin's uniform
-        // shift, so our Jolt static mesh — baked once at OnQuadBuilt —
-        // doesn't follow. Threshold trades off "more re-mirrors per
-        // second" against "vessel can clip through stale terrain by
-        // up to this distance before we catch it." 0.5 m is well below
-        // CollisionEnhancer's ~10 cm punch-through distance budget.
-        const float kQuadDriftThresholdSq = 0.25f;  // 0.5 m^2
-
-        // Re-mirror every active terrain body whose Unity-side
-        // transform has drifted more than the threshold from our
-        // last bake. Called from LongeronSceneDriver.FixedUpdate
-        // each tick (cheap — typical ~1000 active quads, one
-        // Vector3 distance check each).
-        // Drift telemetry — accumulated across ticks, flushed at most
-        // once per second so a fast-rotating planet doesn't produce
-        // 50 lines per second.
-        static int _driftRemirrorAccum;
-        static float _driftLogLastTime;
-        static float _driftMaxThisWindow;
-
-        public static void UpdateActive()
-        {
-            if (LongeronAddon.ActiveWorld == null) return;
-            var list = QuadBody.Active;
-            for (int i = list.Count - 1; i >= 0; i--)
-            {
-                var qb = list[i];
-                if (qb == null) { list.RemoveAt(i); continue; }
-                var quad = qb.Quad;
-                if (quad == null || quad.gameObject == null) continue;
-
-                Vector3 now = quad.transform.position;
-                Vector3 delta = now - qb.BakedWorldPosition;
-                float dSq = delta.sqrMagnitude;
-                if (dSq < kQuadDriftThresholdSq) continue;
-
-                if (dSq > _driftMaxThisWindow) _driftMaxThisWindow = dSq;
-
-                // Drifted — destroy the stale Jolt body and re-mirror
-                // with current vertex coords. DestroyImmediate avoids
-                // the [DisallowMultipleComponent] race when AddComponent
-                // runs in the same frame.
-                UnityEngine.Object.DestroyImmediate(qb);
-                TryMirrorQuad(quad);
-                _driftRemirrorAccum++;
-            }
-
-            if (_driftRemirrorAccum > 0 && Time.realtimeSinceStartup - _driftLogLastTime > 1.0f)
-            {
-                Debug.Log(LogPrefix + string.Format(
-                    "drift remirror: {0} quad(s) in last second, max drift {1:F2} m",
-                    _driftRemirrorAccum, Mathf.Sqrt(_driftMaxThisWindow)));
-                _driftRemirrorAccum = 0;
-                _driftMaxThisWindow = 0;
-                _driftLogLastTime = Time.realtimeSinceStartup;
-            }
         }
 
         // -- Per-second diagnostic: raycast vessel→terrain, compare
@@ -411,19 +363,25 @@ namespace Longeron.Integration
                 Vector3 qPos = pq.transform.position;
                 if (qb != null)
                 {
-                    Vector3 baked = qb.BakedWorldPosition;
-                    Vector3 drift = qPos - baked;
+                    // Re-derive the CB-frame position of this quad now;
+                    // compare against the position we baked into Jolt.
+                    // With the frame redesign these should match exactly
+                    // (no drift in CB-frame).
+                    var frame = CbFrame.Current();
+                    Vector3d nowCb = frame.IsValid
+                        ? frame.WorldToCb(new Vector3d(qPos.x, qPos.y, qPos.z))
+                        : Vector3d.zero;
+                    Vector3d delta = nowCb - qb.BakedCbPosition;
                     quadInfo = string.Format(
-                        "lod={0} body={1} quadPos=({2:F2},{3:F2},{4:F2}) baked=({5:F2},{6:F2},{7:F2}) drift={8:F3}m",
+                        "lod={0} body={1} cbDrift={2:F4}m worldPos=({3:F2},{4:F2},{5:F2})",
                         pq.subdivision, qb.Handle.Id,
-                        qPos.x, qPos.y, qPos.z,
-                        baked.x, baked.y, baked.z,
-                        drift.magnitude);
+                        delta.magnitude,
+                        qPos.x, qPos.y, qPos.z);
                 }
                 else
                 {
                     quadInfo = string.Format(
-                        "lod={0} body=<unmirrored> quadPos=({1:F2},{2:F2},{3:F2})",
+                        "lod={0} body=<unmirrored> worldPos=({1:F2},{2:F2},{3:F2})",
                         pq.subdivision, qPos.x, qPos.y, qPos.z);
                 }
             }

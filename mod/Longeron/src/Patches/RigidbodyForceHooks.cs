@@ -7,8 +7,13 @@
 //
 // JoltBody.GetComponent dispatch keeps the patch hot path to a single
 // O(1) Unity component lookup — no global dictionary mutation.
+//
+// Phase 3b: Jolt's coordinate frame is the active vessel's mainBody-
+// fixed (rotating) frame, not Unity world. Force/torque vectors are
+// transformed into CB axes via CbFrame.WorldDirToCb at queue time.
 
 using HarmonyLib;
+using Longeron.Integration;
 using Longeron.Native;
 using UnityEngine;
 
@@ -48,16 +53,29 @@ namespace Longeron.Patches
         // Returns true if the call was redirected and the original should be
         // skipped. Returns false if the rb isn't Longeron-managed (let stock
         // physics handle it) or the bridge isn't ready.
+        //
+        // Cross-product equivariance: r × F transforms covariantly under
+        // rotation, so we can either compute the torque in Unity axes
+        // before transforming or transform r and F first; either gives
+        // the same CB-frame torque. Caller computes (force, torque)
+        // pairs in Unity world axes; we transform the pair here.
         static bool TryRedirect(Rigidbody rb, Vector3 force, Vector3 torque)
         {
             if (LongeronAddon.ActiveWorld == null) return false;
             if (rb == null) return false;
             var jb = rb.GetComponent<JoltBody>();
             if (jb == null) return false;
+
+            var frame = CbFrame.Current();
+            if (!frame.IsValid) return false;
+
+            Vector3d fCb = frame.WorldDirToCb(new Vector3d(force.x, force.y, force.z));
+            Vector3d tCb = frame.WorldDirToCb(new Vector3d(torque.x, torque.y, torque.z));
+
             LongeronAddon.ActiveWorld.Input.WriteForceDelta(
                 jb.Handle,
-                force.x, force.y, force.z,
-                torque.x, torque.y, torque.z);
+                fCb.x, fCb.y, fCb.z,
+                tCb.x, tCb.y, tCb.z);
             return true;
         }
 

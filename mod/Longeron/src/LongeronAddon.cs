@@ -32,10 +32,10 @@ namespace Longeron
 
             GameEvents.onLevelWasLoadedGUIReady.Add(OnLevelLoaded);
             GameEvents.onGameSceneLoadRequested.Add(OnSceneLoadRequested);
-            GameEvents.onFloatingOriginShift.Add(OnFloatingOriginShift);
             GameEvents.onVesselWasModified.Add(OnVesselWasModified);
             GameEvents.onVesselCreate.Add(OnVesselCreated);
             GameEvents.onVesselDestroy.Add(OnVesselDestroyed);
+            GameEvents.onVesselSOIChanged.Add(OnVesselSOIChanged);
 
             gameObject.AddComponent<LongeronSceneDriver>();
         }
@@ -44,10 +44,10 @@ namespace Longeron
         {
             GameEvents.onLevelWasLoadedGUIReady.Remove(OnLevelLoaded);
             GameEvents.onGameSceneLoadRequested.Remove(OnSceneLoadRequested);
-            GameEvents.onFloatingOriginShift.Remove(OnFloatingOriginShift);
             GameEvents.onVesselWasModified.Remove(OnVesselWasModified);
             GameEvents.onVesselCreate.Remove(OnVesselCreated);
             GameEvents.onVesselDestroy.Remove(OnVesselDestroyed);
+            GameEvents.onVesselSOIChanged.Remove(OnVesselSOIChanged);
             DisposeWorld();
         }
 
@@ -58,26 +58,40 @@ namespace Longeron
         void OnVesselCreated(Vessel v) => TopologyReconciler.MarkDirty(v);
         void OnVesselDestroyed(Vessel v) => TopologyReconciler.MarkDirty(v);
 
-        // Krakensbane / FloatingOrigin shifted Unity's world origin.
-        // Translate every Jolt body by the same delta KSP applied to
-        // active flying vessel rigidbodies — that's just the
-        // Krakensbane component (`offset`), NOT
-        // `offsetNonKrakensbane` (= `offset + nonKrakensbane`). See
-        // ~/dev/ksp-reference/source/Assembly-CSharp/FloatingOrigin.cs:
-        //   line 311: vessel.SetPosition(transform.position - vector3d2)
-        //   line 252: vector3d2 = offset (for non-packed, non-landed)
-        //   line 257: vector3d2 = offsetNonKrakensbane (for packed/landed)
-        // We over-shifted by `nonKrakensbane` per event before, which
-        // visibly desynced the vessel from the camera's view as
-        // FloatingOrigin shifts accumulated. Synthetic ground and
-        // future static geometry technically want
-        // `offsetNonKrakensbane` to track terrain — Phase 3
-        // territory. For now Phase 2.4 covers active vessels.
-        void OnFloatingOriginShift(Vector3d offset, Vector3d nonKrakensbane)
+        // FloatingOrigin shift handling deliberately removed (Phase 3b
+        // frame redesign). Jolt now operates in CB-fixed coordinates;
+        // CbFrame.WorldToCb / CbToWorld at the bridge boundary absorb
+        // FloatingOrigin shifts because mainBody.position and rb.position
+        // shift by identical deltas — their difference is invariant.
+        // See /Users/alx/.claude/plans/splendid-dancing-flute.md.
+
+        // Active vessel transitions to a new mainBody. The Jolt world
+        // is anchored to the previous mainBody's frame, so all body
+        // positions / velocities / terrain are now expressed in the
+        // wrong frame. Tear down + rebuild — the player is in
+        // transition, a few hundred ms is acceptable.
+        void OnVesselSOIChanged(GameEvents.HostedFromToAction<Vessel, CelestialBody> ev)
         {
+            if (ev.host != FlightGlobals.ActiveVessel) return;
             if (ActiveWorld == null) return;
-            Vector3d delta = -offset;
-            ActiveWorld.Input.WriteShiftWorld(delta.x, delta.y, delta.z);
+            Debug.Log(LogPrefix + $"SOI change for active vessel: {ev.from?.name} -> {ev.to?.name} — rebuilding world");
+            RebuildWorld();
+        }
+
+        void RebuildWorld()
+        {
+            DisposeWorld();
+            ActiveWorld = new World(LongeronConfig.Default);
+            var driver = GetComponent<LongeronSceneDriver>();
+            if (driver != null) driver.NotifyWorldCreated();
+            Streamer.AttachToAllPQS();
+            foreach (var v in FlightGlobals.Vessels)
+            {
+                if (v == null) continue;
+                if (v.packed) continue;
+                var module = v.FindVesselModuleImplementing<LongeronVesselModule>();
+                if (module != null) module.OnGoOffRails();
+            }
         }
 
         // Flight scene entry. The World is created here; vessel

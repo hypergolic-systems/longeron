@@ -38,6 +38,10 @@ namespace Longeron.Integration
         // Returns true if at least one sub-shape was emitted; false if
         // the part contributed no usable colliders (caller should not
         // create a body in that case).
+        //
+        // The part's anchor pose is captured in Unity world and converted
+        // to CB-frame via the supplied CbFrame before submission. Sub-
+        // shape transforms are part-local and frame-invariant.
         public static bool WriteBodyFor(
             InputBuffer input,
             BodyHandle handle,
@@ -45,12 +49,15 @@ namespace Longeron.Integration
             BodyType bodyType,
             Layer layer,
             float massKg,
-            uint groupId)
+            uint groupId,
+            CbFrame frame)
         {
-            // Part transform anchors the body's frame.
+            // Part transform anchors the body's frame, expressed in
+            // CB-fixed coords.
             var partXform = part.transform;
-            var partWorldPos = partXform.position;
-            var partWorldRot = partXform.rotation;
+            Vector3d partCbPos = frame.WorldToCb(new Vector3d(
+                partXform.position.x, partXform.position.y, partXform.position.z));
+            QuaternionD partCbRot = frame.WorldToCb((QuaternionD)partXform.rotation);
 
             // First pass: enumerate + classify, compute total count for
             // BeginBodyCreate's shape_count byte. Re-walking is cheap;
@@ -94,8 +101,9 @@ namespace Longeron.Integration
 
             input.BeginBodyCreate(
                 handle, bodyType, layer,
-                posX: partWorldPos.x, posY: partWorldPos.y, posZ: partWorldPos.z,
-                rotX: partWorldRot.x, rotY: partWorldRot.y, rotZ: partWorldRot.z, rotW: partWorldRot.w,
+                posX: partCbPos.x, posY: partCbPos.y, posZ: partCbPos.z,
+                rotX: (float)partCbRot.x, rotY: (float)partCbRot.y,
+                rotZ: (float)partCbRot.z, rotW: (float)partCbRot.w,
                 mass: massKg,
                 shapeCount: (byte)subShapes.Count,
                 groupId: groupId);
