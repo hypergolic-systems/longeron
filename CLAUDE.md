@@ -203,71 +203,67 @@ write/read.
 `NativeBridge.cs` for the P/Invoke decls, `InputBuffer.cs` /
 `OutputBuffer.cs` for serialization, `World.cs` for session lifetime.
 
-### Featherstone solver (Phase 4 target — `mod/Longeron.Physics/`)
+### Featherstone solver (Phase 4 target — native, alongside Jolt)
 
-Phase 4 wires inverse-dynamics joint-force accounting onto the
-single-body vessel motion. The solver doesn't drive poses; it
-*reads* the vessel's overall acceleration and external wrenches
-from Jolt and decomposes them into per-edge stresses.
+Phase 4 lives in the C++ bridge, alongside Jolt. The solver doesn't
+drive poses; it *reads* the vessel's overall acceleration and
+external wrenches from Jolt and decomposes them into per-edge
+stresses.
+
+Why native, not HPC# / Burst:
+
+- The data the solver needs (per-body inertia, mass, world pose,
+  velocity, accumulated forces) all lives in Jolt's `Body` /
+  `BodyInterface` already. A C++ implementation reads it directly,
+  no marshalling across the bridge per tick.
+- Jolt ships `Math/MathTypes.h` (Vec3, Mat44, Quat, RVec3) plus
+  spatial-vector machinery used internally by its constraints —
+  immediate building blocks for an RNEA pass without re-implementing
+  6D motion/force algebra.
+- Threading: Jolt's `JobSystem` is right there; per-vessel RNEA
+  passes parallelize trivially via the same job pool that runs the
+  broadphase and constraint solver. HGS's "tick thousands of
+  vessels at microseconds each" goal benefits directly.
+- Single physics layer means a single ABI surface for the C# side.
+  We add a new output record carrying per-edge wrench, and a few
+  inputs for tree topology + break thresholds — that's it. The C#
+  side only needs to translate KSP topology to native records and
+  consume break events; no math.
+
+Solver shape:
 
 - One spanning tree per vessel (while loaded + unpacked), built from
-  `part.parent` walks. Every part knows its parent and the joint
-  through which it's connected.
-- **RNEA pass** — Featherstone Ch. 5. Two recursions:
+  `part.parent` walks. Each tree node knows its parent, its
+  joint-to-parent (six DOF spec for Phase 4+ flex; identity weld
+  for the rigid default), and its inertial properties.
+- **RNEA pass** — Featherstone Ch. 5. Two recursions, O(n) per
+  vessel:
   - Leaf-to-root forward: propagate kinematics (each subtree's
     velocity, acceleration, and momentum at the parent joint).
   - Root-to-leaf backward: propagate forces (the wrench transmitted
-    across each joint, given external forces at every part).
-- The output wrenches feed straight into the stock joint-break
-  comparison: `|F| > breakForce || |τ| > breakTorque` triggers
-  `Part.decouple()` via the existing decouple path; the topology
+    across each joint, given external forces at every part and the
+    base body's acceleration).
+- The output wrenches stream back to C# as per-edge records; KSP
+  integration code compares against `breakForce` / `breakTorque`
+  and synthesizes `Part.decouple()` on excess. The topology
   reconciler then rebuilds the affected vessel(s).
 - **Loop closures** (docking rings, KAS struts forming cycles)
   contribute additional force pairs computed from the kinematic
-  state of their two endpoints. They're not constraints needing KKT
-  projection — just extra terms in the wrench accounting.
-- No allocations in the hot path. SoA `NativeArray<T>`-style layout.
+  state of their two endpoints. Not constraints needing KKT
+  projection — extra terms in the wrench accounting.
+- No allocations in the hot path. SoA layout for tree state arrays.
 
 Optional **forward-dynamics ABA mode** (Featherstone Ch. 7 + 9, off
 by default): if a future user *wants* visible flex (space-station
-ring sag, soft landing legs), the same data structures support
+ring sag, soft landing legs), the same C++ data structures support
 forward dynamics in reduced coordinates with stiff implicit-Euler
 joint integration. ABA writes per-part poses into Jolt as kinematic
-overrides, and Jolt sees no inter-body constraints from the vessel —
-just per-tick pose updates. Unconditional stability at 50 Hz without
-substepping. **This is opt-in; the default vessel model is rigid.**
+overrides on those parts; the rest of the vessel stays single-body.
+Unconditional stability at 50 Hz without substepping. **Opt-in; the
+default vessel model is rigid.**
 
-In Phases 0–3, `mod/Longeron.Physics/` exists but is not wired into
-the flight path. Phase 4 wires the RNEA pass first (needed for
-parity with stock breakage); the optional forward-dynamics ABA mode
-is post-Phase-4 if anyone asks for it.
-
-### KSPBurst / HPC# integration (applies to `Longeron.Physics`, Phase 4)
-
-Physics project (`Longeron.Physics`) is written as a **HPC# subset**
-so inner loops can be AOT-compiled via
-[KSPBurst](https://github.com/KSPModdingLibs/KSPBurst) — ships
-Unity.Burst 1.7.4 + Unity.Mathematics 1.2.6 + Unity.Collections
-0.8.0-preview + Unity.Jobs 0.2.9-preview.
-
-Discipline within `Longeron.Physics`:
-
-- Structs only in hot paths; no managed references crossing into
-  `[BurstCompile]` code.
-- Blittable types only. `Unity.Mathematics` (`float3`, `float3x3`,
-  `float4x4`) instead of Unity's `Vector3 / Quaternion` in numeric
-  code.
-- No exceptions in Burst-compiled code; preconditions via asserts
-  or error codes.
-- `NativeArray<T>` for body state, not managed arrays.
-- No virtual dispatch, no generics over reference types.
-
-The native bridge in `Longeron.Native` does *not* use Burst — it's
-a plain managed wrapper around P/Invoke. Burst applies only to the
-RNEA / ABA math in `Longeron.Physics` once Phase 4 wires it in.
-
-Discipline stops at the module boundary. `Longeron` (KSP
-integration) is ordinary C#.
+The vestigial `mod/Longeron.Physics/` C# project exists but does
+not own Phase 4. Likely retired in cleanup.
 
 ### KSP integration (`mod/Longeron/`)
 
@@ -496,7 +492,7 @@ longeron/
     Assembly-CSharp-firstpass.dll
     UnityEngine.*.dll
     mscorlib.dll, System*.dll
-  native/                       # C++ Jolt bridge
+  native/                       # C++ Jolt bridge + Phase 4 solver
     CMakeLists.txt
     third_party/JoltPhysics/    # git submodule, pinned release
     src/
@@ -505,6 +501,10 @@ longeron/
                                 #   body registry, layer manager
       records.h                 # shared wire-format enum (with C# mirror)
       contact_listener.{h,cpp}  # JPH::ContactListener impl
+      # Phase 4 (planned):
+      # tree.{h,cpp}             # per-vessel spanning tree from part.parent
+      # rnea.{h,cpp}             # Featherstone Ch. 5 recursive Newton-Euler
+      # aba.{h,cpp}              # optional forward dynamics (Ch. 7+9)
   mod/
     Longeron.sln
     Longeron.Native/            # C# wrapper around the bridge
@@ -515,15 +515,7 @@ longeron/
         OutputBuffer.cs         # reader
         BodyHandle.cs           # opaque integer body ID
         World.cs                # session lifetime owner
-    Longeron.Physics/           # HPC# RNEA + (optional) ABA solver — Phase 4 target
-      Longeron.Physics.csproj   # net48, Burst-compatible subset
-      src/
-        Spatial/                # 6D motion/force algebra
-        ArticulatedBody.cs      # SoA flat arrays
-        Solver/
-          Rnea.cs               # recursive Newton-Euler (inverse dynamics) — primary
-          ABA.cs                # forward dynamics (optional flex mode)
-        Math/                   # float3, float3x3, quaternion
+    Longeron.Physics/           # vestigial; Phase 4 lives native-side now
     Longeron/                   # KSP integration plugin
       Longeron.csproj           # net48 + Lib.Harmony + Assembly-CSharp refs
       src/
@@ -571,14 +563,10 @@ should load standalone.
   RNEA + ABA + closed-loop treatment. Ch. 5 (RNEA) is the Phase 4
   workhorse; Ch. 7 + 9 cover ABA + spring-damper joints for the
   optional flex mode.
-- [Jolt Physics](https://github.com/jrouwe/JoltPhysics) — the engine.
-  See in particular [the architecture
-  document](https://jrouwe.github.io/JoltPhysics/index.html).
-- [KSPBurst](https://github.com/KSPModdingLibs/KSPBurst) — Unity
-  Burst toolchain packaged for KSP (Phase 4).
-- Unity [Mathematics](https://docs.unity3d.com/Packages/com.unity.mathematics@latest)
-  / [Collections](https://docs.unity3d.com/Packages/com.unity.collections@latest)
-  / [Jobs](https://docs.unity3d.com/Packages/com.unity.jobs@latest)
-  — the HPC# surface `Longeron.Physics` targets.
+- [Jolt Physics](https://github.com/jrouwe/JoltPhysics) — the engine
+  and (in Phase 4) the host process for the native Featherstone
+  pass. See [the architecture
+  document](https://jrouwe.github.io/JoltPhysics/index.html); the
+  `Math/` and `Body/` headers are the immediate building blocks.
 - `ksp/Assembly-CSharp/` in sibling HGS repo — decompiled stock
   source, authoritative for behavior questions.
