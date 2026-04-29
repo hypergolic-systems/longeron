@@ -39,6 +39,19 @@ namespace Longeron
         {
             if (vessel == null) return;
             if (LongeronAddon.ActiveWorld == null) return;
+
+            // Stamp every part's rigidbody as kinematic *before* the
+            // reconciler runs in the next FixedUpdate. Stock KSP just
+            // set isKinematic = false during Vessel.Unpack and created
+            // ConfigurableJoints between parts — without immediate
+            // takeover, Unity's PhysX gets one step with non-kinematic
+            // rbs + compliant joints, settling the rocket into stock-
+            // wobble equilibrium (e.g., side boosters tilt 15° outward
+            // before we capture poses). Reconciler then sends BodyCreate
+            // at those drifted poses; FixedConstraint records the drift
+            // as the rest pose, locking the wobble in.
+            ApplyKinematicTakeover(vessel);
+
             TopologyReconciler.MarkDirty(vessel);
         }
 

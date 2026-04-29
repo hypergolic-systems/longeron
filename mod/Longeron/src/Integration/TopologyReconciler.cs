@@ -181,7 +181,34 @@ namespace Longeron.Integration
                 if (!mv.Bodies.TryGetValue(edge.Item2, out var childH)) continue;
 
                 uint cid = SceneRegistry.MintConstraintId();
-                input.WriteConstraintCreateFixed(cid, parentH, childH);
+                if (AttachAnchors.TryResolveWorld(edge.Item2, edge.Item1, out var anchorWorld))
+                {
+                    // Convert Unity-world anchor → CB-frame, matching
+                    // the body coordinate system the native side uses.
+                    Vector3d anchorCb = frame.WorldToCb(new Vector3d(
+                        anchorWorld.x, anchorWorld.y, anchorWorld.z));
+                    input.WriteConstraintCreateFixedAt(
+                        cid, parentH, childH,
+                        anchorCb.x, anchorCb.y, anchorCb.z);
+                    Debug.Log(LogPrefix + string.Format(
+                        "edge cid={0} {1} -> {2} anchorWorld=({3:F2},{4:F2},{5:F2}) anchorCb=({6:F2},{7:F2},{8:F2})",
+                        cid,
+                        edge.Item1?.partInfo?.name ?? "?",
+                        edge.Item2?.partInfo?.name ?? "?",
+                        anchorWorld.x, anchorWorld.y, anchorWorld.z,
+                        anchorCb.x, anchorCb.y, anchorCb.z));
+                }
+                else
+                {
+                    // Fallback: modded attachment paths (KAS, etc.) that
+                    // don't populate AttachNode pairings. Auto-detect
+                    // anchor at midpoint-of-CoMs preserves prior behavior.
+                    Debug.LogWarning(LogPrefix + $"no attach-node anchor for edge "
+                                     + $"{edge.Item1?.partInfo?.name ?? "?"} -> "
+                                     + $"{edge.Item2?.partInfo?.name ?? "?"} — "
+                                     + "falling back to autoDetect constraint");
+                    input.WriteConstraintCreateFixed(cid, parentH, childH);
+                }
                 mv.AddEdge(edge.Item1, edge.Item2, cid);
                 edgesAdded++;
             }

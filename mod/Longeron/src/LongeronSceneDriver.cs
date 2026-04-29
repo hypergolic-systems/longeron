@@ -34,6 +34,7 @@ namespace Longeron
         internal void NotifyWorldCreated()
         {
             _groundSpawned = false;
+            DiagLogger.Clear();
         }
 
         public void FixedUpdate()
@@ -132,6 +133,16 @@ namespace Longeron
             foreach (var mv in SceneRegistry.Vessels)
             {
                 RefreshVesselVelocityFields(mv.Vessel);
+            }
+
+            // Diagnostic capture of part-pose drift relative to the
+            // vessel root. Tracks first ~5 s after each vessel registers
+            // — useful for spotting whether constraints record the wrong
+            // rest pose at construction or leak over time.
+            DiagLogger.OnTickStart();
+            foreach (var mv in SceneRegistry.Vessels)
+            {
+                DiagLogger.LogVessel(mv.Vessel);
             }
         }
 

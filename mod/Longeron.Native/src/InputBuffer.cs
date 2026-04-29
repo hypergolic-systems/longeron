@@ -24,6 +24,7 @@ namespace Longeron.Native
 
         ShiftWorld        = 9,
         SetBodyGroup      = 10,
+        ConstraintCreateFixedAt = 11,
 
         // Output-only:
         BodyPose          = 64,
@@ -484,6 +485,31 @@ namespace Longeron.Native
             *p++ = (byte)ConstraintKind.Fixed;
             *(uint*)p = bodyA.Id;           p += 4;
             *(uint*)p = bodyB.Id;           p += 4;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Create a FixedConstraint with an explicit world-space anchor
+        /// (CB-frame coords) for better PGS conditioning. Both bodies
+        /// resolve their local-CoM offsets to this world point at
+        /// construction time. Layout: tag(1) + constraint_id(4) + kind(1)
+        /// + body_a(4) + body_b(4) + anchor(double3=24) = 38 bytes.
+        /// </summary>
+        public void WriteConstraintCreateFixedAt(
+            uint constraintId, BodyHandle bodyA, BodyHandle bodyB,
+            double anchorX, double anchorY, double anchorZ)
+        {
+            const int kSize = 38;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.ConstraintCreateFixedAt;
+            *(uint*)p = constraintId;       p += 4;
+            *p++ = (byte)ConstraintKind.Fixed;
+            *(uint*)p = bodyA.Id;           p += 4;
+            *(uint*)p = bodyB.Id;           p += 4;
+            *(double*)p = anchorX;          p += 8;
+            *(double*)p = anchorY;          p += 8;
+            *(double*)p = anchorZ;          p += 8;
             _len += kSize;
         }
 

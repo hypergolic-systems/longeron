@@ -181,8 +181,23 @@ LongeronWorld::LongeronWorld(const ::LongeronConfig& cfg)
     // irrelevant; until then, this is the cheap stiffness fix.
     {
         JPH::PhysicsSettings settings = mPhysicsSystem.GetPhysicsSettings();
-        settings.mNumVelocitySteps = 24;
-        settings.mNumPositionSteps = 8;
+        // KSP rockets are long FixedConstraint chains with high mass
+        // ratios. PGS propagates one link of correction per iteration;
+        // each iteration leaves a residual that warm-starting carries
+        // forward. Empirical observation:
+        //
+        //   24 / 8  iters → boosters oscillate ±15° (bad)
+        //   64 / 32 iters → boosters oscillate ±10°, never settles
+        //   128 / 64 iters → 6° spawn transient, settles by 1.6 s, <0.3° steady
+        //   256 / 128 iters → ? (this attempt)
+        //
+        // Without warm-start: 90° free fall regardless of iteration
+        // count. So warm-start carries λ from prior tick; iterations
+        // refine. Phase 4 (ABA in reduced coords) drops these knobs
+        // entirely — no chain to converge over, joint forces written
+        // directly each tick.
+        settings.mNumVelocitySteps = 256;
+        settings.mNumPositionSteps = 128;
         settings.mBaumgarte = 0.8f;
         mPhysicsSystem.SetPhysicsSettings(settings);
     }
@@ -585,6 +600,68 @@ void LongeronWorld::HandleConstraintCreate(const uint8_t*& cur, const uint8_t* e
     mConstraintRegistry.emplace(constraint_id, constraint);
 }
 
+void LongeronWorld::HandleConstraintCreateFixedAt(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t constraint_id = Read<uint32_t>(cur, end);
+    const uint8_t  kind          = Read<uint8_t>(cur, end);
+    const uint32_t body_a_id     = Read<uint32_t>(cur, end);
+    const uint32_t body_b_id     = Read<uint32_t>(cur, end);
+    const JPH::RVec3 anchor      = ReadDouble3(cur, end);
+
+    if (mConstraintRegistry.find(constraint_id) != mConstraintRegistry.end()) {
+        JPH::Trace("ConstraintCreateFixedAt: duplicate id %u, skipping", constraint_id);
+        return;
+    }
+
+    auto it_a = mBodyRegistry.find(body_a_id);
+    auto it_b = mBodyRegistry.find(body_b_id);
+    if (it_a == mBodyRegistry.end() || it_b == mBodyRegistry.end()) {
+        JPH::Trace("ConstraintCreateFixedAt %u: body lookup failed (a=%u found=%d, b=%u found=%d)",
+                   constraint_id, body_a_id, it_a != mBodyRegistry.end(),
+                   body_b_id, it_b != mBodyRegistry.end());
+        return;
+    }
+
+    const JPH::BodyLockInterfaceNoLock& lock = mPhysicsSystem.GetBodyLockInterfaceNoLock();
+    JPH::Body* body_a = lock.TryGetBody(it_a->second);
+    JPH::Body* body_b = lock.TryGetBody(it_b->second);
+    if (body_a == nullptr || body_b == nullptr) {
+        JPH::Trace("ConstraintCreateFixedAt %u: body fetch returned null", constraint_id);
+        return;
+    }
+
+    JPH::Ref<JPH::Constraint> constraint;
+    switch (static_cast<ConstraintKind>(kind)) {
+    case ConstraintKind::Fixed: {
+        // Same FixedConstraint primitive as the autoDetect path, but
+        // with an explicit world-space anchor. Both bodies resolve
+        // their local-CoM offsets from this world point at construction;
+        // the constraint then enforces "lock relative pose" exactly as
+        // the autoDetect variant. The win is purely solver conditioning:
+        // anchor at the actual KSP attach node (e.g., between a tank
+        // and a radial decoupler) rather than at the midpoint between
+        // the bodies' CoMs (which lands ~0.5 m inside the tank).
+        JPH::FixedConstraintSettings settings;
+        settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+        settings.mAutoDetectPoint = false;
+        settings.mPoint1 = anchor;
+        settings.mPoint2 = anchor;
+        constraint = settings.Create(*body_a, *body_b);
+        break;
+    }
+    default:
+        JPH::Trace("ConstraintCreateFixedAt %u: unknown kind %u", constraint_id, (unsigned)kind);
+        return;
+    }
+
+    if (constraint == nullptr) {
+        JPH::Trace("ConstraintCreateFixedAt %u: settings.Create returned null", constraint_id);
+        return;
+    }
+
+    mPhysicsSystem.AddConstraint(constraint);
+    mConstraintRegistry.emplace(constraint_id, constraint);
+}
+
 void LongeronWorld::HandleShiftWorld(const uint8_t*& cur, const uint8_t* end) {
     const double dx = Read<double>(cur, end);
     const double dy = Read<double>(cur, end);
@@ -762,6 +839,7 @@ int32_t LongeronWorld::Step(
         case RecordType::SetKinematicPose:  HandleSetKinematicPose(cur, end); break;
         case RecordType::ForceDelta:        HandleForceDelta(cur, end); break;
         case RecordType::ConstraintCreate:  HandleConstraintCreate(cur, end); break;
+        case RecordType::ConstraintCreateFixedAt: HandleConstraintCreateFixedAt(cur, end); break;
         case RecordType::ConstraintDestroy: HandleConstraintDestroy(cur, end); break;
         case RecordType::ShiftWorld:        HandleShiftWorld(cur, end); break;
         case RecordType::SetBodyGroup:      HandleSetBodyGroup(cur, end); break;
