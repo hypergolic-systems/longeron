@@ -179,10 +179,148 @@ namespace Longeron.Integration
             // unpacked rigidbodies that haven't been stamped yet.
             LongeronVesselModule.ApplyKinematicTakeover(v);
 
+            // Send the vessel's spanning tree to the native RNEA pass
+            // (Phase 4 advisory — logs per-edge transmitted wrench;
+            // doesn't drive simulation). Built in topology order from
+            // the root walk so parent indices are always < child.
+            EmitVesselTree(v, newHandle, input);
+
             Debug.Log(LogPrefix + string.Format(
                 "{0} '{1}': {2} part(s), mass={3:F2}t, body={4}",
                 firstTime ? "first-register" : "rebuild",
                 v.vesselName, current.Count, totalMass, newHandle.Id));
+        }
+
+        // Walk the part tree rooted at v.rootPart in BFS order so each
+        // child's parent is already in the list before the child itself.
+        // Build per-part {parent_idx, mass, com_local, inertia_diag,
+        // attach_local} in vessel-root frame and send as a
+        // VesselTreeUpdate record. Inertia uses a uniform-density box
+        // approximation around each part's collider AABB — good enough
+        // for advisory magnitudes; precise inertia is Phase 4.1.
+        static readonly List<Part> _bfsScratch = new List<Part>(128);
+        static readonly Dictionary<Part, ushort> _idxScratch = new Dictionary<Part, ushort>(128);
+        static InputBuffer.VesselTreeNode[] _treeNodeScratch =
+            new InputBuffer.VesselTreeNode[128];
+
+        static void EmitVesselTree(Vessel v, BodyHandle vesselBody, InputBuffer input)
+        {
+            if (v == null || v.rootPart == null) return;
+            var rootXform = v.rootPart.transform;
+            if (rootXform == null) return;
+
+            _bfsScratch.Clear();
+            _idxScratch.Clear();
+            _bfsScratch.Add(v.rootPart);
+            _idxScratch[v.rootPart] = 0;
+
+            // BFS to flatten the part tree in topology order.
+            for (int head = 0; head < _bfsScratch.Count; ++head)
+            {
+                var p = _bfsScratch[head];
+                if (p == null) continue;
+                foreach (var child in p.children)
+                {
+                    if (child == null || _idxScratch.ContainsKey(child)) continue;
+                    _idxScratch[child] = (ushort)_bfsScratch.Count;
+                    _bfsScratch.Add(child);
+                }
+            }
+
+            int n = _bfsScratch.Count;
+            if (n > 1024) n = 1024;  // matches kMaxPartsPerVessel native-side
+            if (_treeNodeScratch.Length < n)
+            {
+                _treeNodeScratch = new InputBuffer.VesselTreeNode[
+                    System.Math.Max(n, _treeNodeScratch.Length * 2)];
+            }
+
+            const ushort kInvalidIdx = 0xFFFF;
+            for (int i = 0; i < n; ++i)
+            {
+                var p = _bfsScratch[i];
+                ref var node = ref _treeNodeScratch[i];
+
+                // Parent index in the BFS order. Root has no parent.
+                if (i == 0 || p.parent == null || !_idxScratch.TryGetValue(p.parent, out var parentIdx))
+                    node.ParentIdx = kInvalidIdx;
+                else
+                    node.ParentIdx = parentIdx;
+
+                node.Mass = p.mass + p.GetResourceMass();
+
+                // Part transforms expressed in vessel-root local frame.
+                Vector3 comLocal = rootXform.InverseTransformPoint(p.transform.position);
+                node.ComLocalX = comLocal.x;
+                node.ComLocalY = comLocal.y;
+                node.ComLocalZ = comLocal.z;
+
+                // Inertia: uniform-density solid box from collider AABB
+                // bounds. I_x = (1/12) m (b² + c²) along principal axes.
+                // The bounds are world-axis-aligned; project into vessel-
+                // root frame via the part's rotation. Crude but proportional
+                // to actual mass distribution; Phase 4.1 reads true tensors
+                // from Part fields when available.
+                Vector3 ext = ApproxAABBHalfExtents(p);
+                float bx = ext.x, by = ext.y, bz = ext.z;
+                // (1/3) m (b² + c²) for half-extents — same as (1/12) m * (2b)² + (2c)² distributed.
+                float ix = (node.Mass / 3f) * (by * by + bz * bz);
+                float iy = (node.Mass / 3f) * (bx * bx + bz * bz);
+                float iz = (node.Mass / 3f) * (bx * bx + by * by);
+                node.InertiaDiagX = ix;
+                node.InertiaDiagY = iy;
+                node.InertiaDiagZ = iz;
+
+                // Joint anchor in vessel-root frame. For child parts,
+                // use the part's attachJoint anchor if available; else
+                // fall back to the part's transform position. Root part
+                // has no joint — use (0,0,0).
+                Vector3 attachLocal;
+                if (i == 0)
+                {
+                    attachLocal = Vector3.zero;
+                }
+                else
+                {
+                    var aj = p.attachJoint != null ? p.attachJoint.Joint : null;
+                    if (aj != null)
+                    {
+                        // ConfigurableJoint.connectedAnchor is in the
+                        // connected body's local frame. Transform to
+                        // world via the parent's rb, then to vessel-root.
+                        Vector3 worldAnchor = aj.connectedBody != null
+                            ? aj.connectedBody.transform.TransformPoint(aj.connectedAnchor)
+                            : p.transform.position;
+                        attachLocal = rootXform.InverseTransformPoint(worldAnchor);
+                    }
+                    else
+                    {
+                        attachLocal = comLocal;
+                    }
+                }
+                node.AttachLocalX = attachLocal.x;
+                node.AttachLocalY = attachLocal.y;
+                node.AttachLocalZ = attachLocal.z;
+            }
+
+            // Slice to the actual node count.
+            var slice = new InputBuffer.VesselTreeNode[n];
+            System.Array.Copy(_treeNodeScratch, slice, n);
+            input.WriteVesselTreeUpdate(vesselBody, slice);
+        }
+
+        static Vector3 ApproxAABBHalfExtents(Part p)
+        {
+            Bounds b = default;
+            bool any = false;
+            foreach (var col in p.GetComponentsInChildren<Collider>(includeInactive: false))
+            {
+                if (col == null || col.isTrigger || !col.enabled) continue;
+                if (!any) { b = col.bounds; any = true; }
+                else b.Encapsulate(col.bounds);
+            }
+            if (!any) return new Vector3(0.5f, 0.5f, 0.5f);  // fallback
+            return b.extents;
         }
 
         static void TearDown(ManagedVessel mv, InputBuffer input, Vessel v)

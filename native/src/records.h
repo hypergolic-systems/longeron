@@ -39,11 +39,34 @@ enum class RecordType : uint8_t {
                              //   side computes (point - body_CoM) × force as the implicit torque.
                              //   Used by the single-body-per-vessel model: every part's AddForce
                              //   redirects to the vessel body at the part's CoM-or-attach-point.
+    VesselTreeUpdate  = 13,  // u32 vessel_body_id, u16 part_count,
+                             //   part_count × {
+                             //     u16 parent_idx (0xFFFF = root), float mass,
+                             //     float3 com_local,        // CoM in vessel-root frame
+                             //     float3 inertia_diag,     // diagonal inertia in vessel-root axes
+                             //     float3 attach_local      // joint-to-parent attach point
+                             //   }
+                             //   Sent on every vessel reconcile (after BodyCreate). Native runs
+                             //   an RNEA pass each tick using Jolt's vessel motion to compute
+                             //   per-edge transmitted wrench — Phase 4 advisory; logs only for now.
 
     // ---- Output records (native → C#) ---------------------------------
     BodyPose          = 64,  // u32 user_id, double3 pos, float4 rot, float3 lin_vel, float3 ang_vel
     ContactReport     = 65,  // u32 user_id_a, u32 user_id_b, double3 point, float3 normal, float depth, float impulse
+    RneaSummary       = 66,  // u32 vessel_body_id, u16 part_count,
+                             //   float max_F, u16 max_F_idx, float max_T, u16 max_T_idx,
+                             //   float sum_F, float sum_T,
+                             //   float accel_mag, float alpha_mag
+                             //   Per-vessel summary of the advisory RNEA pass. Phase 4 logs only;
+                             //   Phase 4.1 will use these for break-threshold checks.
 };
+
+// Phase 4: cap on parts per vessel for the RNEA pass. Stock KSP allows
+// vessels of hundreds of parts; 1024 is comfortable headroom for stock
+// + heavy mods. Wire format uses u16 part indices (0xFFFF reserved for
+// "root, no parent").
+inline constexpr uint32_t kMaxPartsPerVessel = 1024;
+inline constexpr uint16_t kInvalidPartIdx    = 0xFFFFu;
 
 // Body motion types. Mirrors JPH::EMotionType. C# side uses the same
 // values. Phase 1 Longeron only uses Static and Kinematic; Dynamic is

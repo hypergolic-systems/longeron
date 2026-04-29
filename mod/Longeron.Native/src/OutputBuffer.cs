@@ -18,6 +18,24 @@ namespace Longeron.Native
     }
 
     /// <summary>
+    /// Per-vessel RNEA pass summary (Phase 4 advisory). Native side
+    /// emits at ~1 Hz; C# logs them via the scene driver.
+    /// </summary>
+    public struct RneaSummaryRecord
+    {
+        public BodyHandle Body;
+        public ushort PartCount;
+        public float  MaxF;       // largest joint force magnitude (kN, KSP convention)
+        public ushort MaxFIdx;    // part index where MaxF lives (joint to its parent)
+        public float  MaxT;
+        public ushort MaxTIdx;
+        public float  SumF;
+        public float  SumT;
+        public float  AccelMag;   // |a_body| this tick (finite-diff)
+        public float  AlphaMag;   // |α_body| this tick
+    }
+
+    /// <summary>
     /// Contact report record from <c>longeron_step</c>. Phase 1 emits
     /// one report per body pair per tick, at the deepest contact point.
     /// </summary>
@@ -112,6 +130,27 @@ namespace Longeron.Native
             record.AngX = *(float*)p;                  p += 4;
             record.AngY = *(float*)p;                  p += 4;
             record.AngZ = *(float*)p;                  p += 4;
+            _cursor += kPayload;
+        }
+
+        public void ReadRneaSummary(out RneaSummaryRecord record)
+        {
+            const int kPayload = 34;  // body_id(4) + part_count(2) + maxF(4) + maxFIdx(2)
+                                       // + maxT(4) + maxTIdx(2) + sumF(4) + sumT(4)
+                                       // + accel(4) + alpha(4)
+            EnsureBytes(kPayload);
+            byte* p = _ptr + _cursor;
+            record = default;
+            record.Body      = new BodyHandle(*(uint*)p);   p += 4;
+            record.PartCount = *(ushort*)p;                 p += 2;
+            record.MaxF      = *(float*)p;                  p += 4;
+            record.MaxFIdx   = *(ushort*)p;                 p += 2;
+            record.MaxT      = *(float*)p;                  p += 4;
+            record.MaxTIdx   = *(ushort*)p;                 p += 2;
+            record.SumF      = *(float*)p;                  p += 4;
+            record.SumT      = *(float*)p;                  p += 4;
+            record.AccelMag  = *(float*)p;                  p += 4;
+            record.AlphaMag  = *(float*)p;                  p += 4;
             _cursor += kPayload;
         }
 

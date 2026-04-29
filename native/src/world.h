@@ -18,6 +18,7 @@
 #include "bridge.h"  // LongeronConfig
 #include "layers.h"
 #include "records.h"
+#include "tree.h"
 
 #include <unordered_map>
 #include <memory>
@@ -69,6 +70,7 @@ private:
     void HandleShiftWorld(const uint8_t*& cur, const uint8_t* end);
     void HandleSetBodyGroup(const uint8_t*& cur, const uint8_t* end);
     void HandleMassUpdate(const uint8_t*& cur, const uint8_t* end);
+    void HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* end);
 
     // -- Output emission ----------------------------------------------
     void EmitBodyPoses();
@@ -105,6 +107,11 @@ private:
     // Constraint ref. Phase 2.2 only adds FixedConstraint; future
     // kinds extend the same map.
     std::unordered_map<uint32_t, JPH::Ref<JPH::Constraint>> mConstraintRegistry;
+
+    // Per-vessel spanning trees + RNEA solver. Populated by
+    // VesselTreeUpdate records; advisory pass runs after each
+    // PhysicsSystem::Update.
+    TreeRegistry mTreeRegistry;
 
     // Per-tick output buffer cursor (only valid during Step).
     uint8_t* mOutputBuffer = nullptr;

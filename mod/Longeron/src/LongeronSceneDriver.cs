@@ -117,6 +117,21 @@ namespace Longeron
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out _);
                         break;
+                    case RecordType.RneaSummary:
+                        world.Output.ReadRneaSummary(out var rnea);
+                        if (JoltBody.TryGet(rnea.Body.Id, out var rneaOwner)
+                            && rneaOwner.Part != null
+                            && rneaOwner.Part.vessel != null)
+                        {
+                            Debug.Log("[Longeron/rnea] " + string.Format(
+                                "v='{0}' parts={1} |a|={2:F2}m/s² |α|={3:F3}rad/s² " +
+                                "joints: maxF={4:F1}kN@{5} maxT={6:F2}kN·m@{7} sumF={8:F1}kN sumT={9:F2}kN·m",
+                                rneaOwner.Part.vessel.vesselName, rnea.PartCount,
+                                rnea.AccelMag, rnea.AlphaMag,
+                                rnea.MaxF, rnea.MaxFIdx, rnea.MaxT, rnea.MaxTIdx,
+                                rnea.SumF, rnea.SumT));
+                        }
+                        break;
                     default:
                         Debug.LogWarning(LogPrefix + "unexpected output record type " + type);
                         break;

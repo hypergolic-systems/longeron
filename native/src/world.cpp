@@ -516,6 +516,7 @@ void LongeronWorld::HandleBodyDestroy(const uint8_t*& cur, const uint8_t* end) {
     bi.RemoveBody(it->second);
     bi.DestroyBody(it->second);
     mBodyRegistry.erase(it);
+    mTreeRegistry.Erase(user_id);
 }
 
 void LongeronWorld::HandleSetGravity(const uint8_t*& cur, const uint8_t* end) {
@@ -723,6 +724,46 @@ void LongeronWorld::HandleMassUpdate(const uint8_t*& cur, const uint8_t* end) {
     mp->SetMassProperties(JPH::EAllowedDOFs::All, props);
 }
 
+void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t body_id    = Read<uint32_t>(cur, end);
+    const uint16_t part_count = Read<uint16_t>(cur, end);
+
+    if (part_count == 0) {
+        mTreeRegistry.Erase(body_id);
+        return;
+    }
+    if (part_count > kMaxPartsPerVessel) {
+        JPH::Trace("VesselTreeUpdate: part_count=%u exceeds cap %u for body %u",
+                   (unsigned)part_count, (unsigned)kMaxPartsPerVessel, body_id);
+        // Skip the entire payload to keep the parser aligned.
+        const size_t payload_size = static_cast<size_t>(part_count)
+            * (2 + 4 + 12 + 12 + 12);  // u16 + float + 3 × float3
+        if (cur + payload_size <= end) cur += payload_size;
+        else cur = end;
+        return;
+    }
+
+    std::vector<PartNode> nodes;
+    nodes.reserve(part_count);
+    for (uint16_t i = 0; i < part_count; ++i) {
+        PartNode n;
+        n.parent_idx   = Read<uint16_t>(cur, end);
+        n.mass         = Read<float>(cur, end);
+        n.com_local    = ReadFloat3(cur, end);
+        n.inertia_diag = ReadFloat3(cur, end);
+        n.attach_local = ReadFloat3(cur, end);
+        // Validate parent: must be < i (topology order) or kInvalidPartIdx.
+        if (n.parent_idx != kInvalidPartIdx && n.parent_idx >= i) {
+            JPH::Trace("VesselTreeUpdate: bad parent_idx %u at node %u (must be < node)",
+                       (unsigned)n.parent_idx, (unsigned)i);
+            return;  // Drop the whole tree on malformed topology.
+        }
+        nodes.push_back(n);
+    }
+
+    mTreeRegistry.Upsert(body_id, std::move(nodes));
+}
+
 void LongeronWorld::HandleSetBodyGroup(const uint8_t*& cur, const uint8_t* end) {
     const uint32_t user_id = Read<uint32_t>(cur, end);
     const uint32_t group_id = Read<uint32_t>(cur, end);
@@ -850,6 +891,7 @@ int32_t LongeronWorld::Step(
     while (cur < end) {
         const uint8_t tag = *cur++;
         switch (static_cast<RecordType>(tag)) {
+        case RecordType::VesselTreeUpdate:  HandleVesselTreeUpdate(cur, end); break;
         case RecordType::BodyCreate:        HandleBodyCreate(cur, end); break;
         case RecordType::BodyDestroy:       HandleBodyDestroy(cur, end); break;
         case RecordType::SetGravity:        HandleSetGravity(cur, end); break;
@@ -891,6 +933,34 @@ int32_t LongeronWorld::Step(
     // 3. Emit body poses. Contact records were appended by the
     //    contact listener during the Update call.
     EmitBodyPoses();
+
+    // 4. Advisory RNEA pass over per-vessel spanning trees. Reads
+    //    Jolt's post-step velocity to estimate acceleration via finite
+    //    difference, computes per-edge transmitted wrench, emits a
+    //    per-vessel RneaSummary record at ~1 Hz. Phase 4.0 — no
+    //    influence on simulation.
+    if (mTreeRegistry.RunAdvisoryPass(mPhysicsSystem, mBodyRegistry, mStepCount, dt)) {
+        // 35 bytes per summary: tag(1) + body_id(4) + part_count(2)
+        //   + max_F(4) + max_F_idx(2) + max_T(4) + max_T_idx(2)
+        //   + sum_F(4) + sum_T(4) + accel_mag(4) + alpha_mag(4).
+        constexpr size_t kSize = 35;
+        for (const auto& s : mTreeRegistry.GetLastSummaries()) {
+            if (!ReserveOutput(kSize)) break;
+            uint8_t* p = mOutputBuffer + mOutputLen;
+            *p = static_cast<uint8_t>(RecordType::RneaSummary); p += 1;
+            Write(p, s.body_id);
+            Write(p, s.part_count);
+            Write(p, s.max_F);
+            Write(p, s.max_F_idx);
+            Write(p, s.max_T);
+            Write(p, s.max_T_idx);
+            Write(p, s.sum_F);
+            Write(p, s.sum_T);
+            Write(p, s.accel_mag);
+            Write(p, s.alpha_mag);
+            mOutputLen += kSize;
+        }
+    }
 
     *output_len = mOutputLen;
     ++mStepCount;

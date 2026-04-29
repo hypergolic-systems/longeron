@@ -26,10 +26,12 @@ namespace Longeron.Native
         SetBodyGroup      = 10,
         ConstraintCreateFixedAt = 11,
         ForceAtPosition   = 12,
+        VesselTreeUpdate  = 13,
 
         // Output-only:
         BodyPose          = 64,
         ContactReport     = 65,
+        RneaSummary       = 66,
     }
 
     /// <summary>
@@ -590,6 +592,57 @@ namespace Longeron.Native
             *p++ = (byte)RecordType.MassUpdate;
             *(uint*)p = body.Id;            p += 4;
             *(float*)p = mass;              p += 4;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Per-part data for a single node in a vessel's spanning tree.
+        /// All quantities expressed in the vessel-root local frame.
+        /// </summary>
+        public struct VesselTreeNode
+        {
+            public ushort  ParentIdx;     // 0xFFFF for root
+            public float   Mass;          // tonnes
+            public float   ComLocalX, ComLocalY, ComLocalZ;
+            public float   InertiaDiagX, InertiaDiagY, InertiaDiagZ;
+            public float   AttachLocalX, AttachLocalY, AttachLocalZ;
+        }
+
+        /// <summary>
+        /// Send a vessel's spanning tree to the native RNEA solver. Called
+        /// after the corresponding BodyCreate. <paramref name="vesselBodyId"/>
+        /// must match the vessel body's user_id. Nodes must be in topology
+        /// order (every parent_idx strictly less than the node's own
+        /// index, or 0xFFFF for the root).
+        /// Layout: tag(1) + body_id(4) + part_count(2)
+        ///         + part_count × (parent_idx(2) + mass(4) + 3 × float3(36)) = 7 + N*42 bytes.
+        /// </summary>
+        public void WriteVesselTreeUpdate(BodyHandle vesselBody, VesselTreeNode[] nodes)
+        {
+            int n = nodes != null ? nodes.Length : 0;
+            const int kHeader = 1 /*tag*/ + 4 /*body_id*/ + 2 /*part_count*/;
+            const int kPerNode = 2 + 4 + 12 + 12 + 12;  // 42 bytes
+            int kSize = kHeader + n * kPerNode;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.VesselTreeUpdate;
+            *(uint*)p = vesselBody.Id;     p += 4;
+            *(ushort*)p = (ushort)n;       p += 2;
+            for (int i = 0; i < n; ++i)
+            {
+                ref var node = ref nodes[i];
+                *(ushort*)p = node.ParentIdx;     p += 2;
+                *(float*)p  = node.Mass;          p += 4;
+                *(float*)p  = node.ComLocalX;     p += 4;
+                *(float*)p  = node.ComLocalY;     p += 4;
+                *(float*)p  = node.ComLocalZ;     p += 4;
+                *(float*)p  = node.InertiaDiagX;  p += 4;
+                *(float*)p  = node.InertiaDiagY;  p += 4;
+                *(float*)p  = node.InertiaDiagZ;  p += 4;
+                *(float*)p  = node.AttachLocalX;  p += 4;
+                *(float*)p  = node.AttachLocalY;  p += 4;
+                *(float*)p  = node.AttachLocalZ;  p += 4;
+            }
             _len += kSize;
         }
 
