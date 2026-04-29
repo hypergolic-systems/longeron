@@ -75,6 +75,27 @@ namespace Longeron.Integration
                 rootXform.position.x, rootXform.position.y, rootXform.position.z));
             QuaternionD rootCbRot = frame.WorldToCb((QuaternionD)rootXform.rotation);
 
+            // Initial vessel velocity in CB-frame. Stock unpack
+            // (Vessel.GoOffRails → Part.SetWorldVelocity) writes
+            // rb.velocity / rb.angularVelocity from orbit propagation,
+            // so by the time the reconciler runs these reflect the
+            // pre-pack velocity. Without this, every rails round-trip
+            // resets the body to rest in Jolt and the vessel re-falls
+            // from gravity — visible as "I lost all my velocity coming
+            // out of time warp".
+            Vector3 rootRbVel = Vector3.zero;
+            Vector3 rootRbAngVel = Vector3.zero;
+            if (root.rb != null)
+            {
+                rootRbVel    = root.rb.velocity;
+                rootRbAngVel = root.rb.angularVelocity;
+            }
+            Vector3d linCb = frame.WorldVelToCb(
+                new Vector3d(rootRbVel.x, rootRbVel.y, rootRbVel.z),
+                new Vector3d(rootXform.position.x, rootXform.position.y, rootXform.position.z));
+            Vector3d angCb = frame.WorldAngVelToCb(
+                new Vector3d(rootRbAngVel.x, rootRbAngVel.y, rootRbAngVel.z));
+
             var subShapes = new List<SubShape>(64);
             outPartOffsets.Clear();
 
@@ -129,6 +150,8 @@ namespace Longeron.Integration
                 rotZ: (float)rootCbRot.z, rotW: (float)rootCbRot.w,
                 mass: totalMassKg,
                 shapeCount: (byte)subShapes.Count,
+                linVx: (float)linCb.x, linVy: (float)linCb.y, linVz: (float)linCb.z,
+                angVx: (float)angCb.x, angVy: (float)angCb.y, angVz: (float)angCb.z,
                 groupId: groupId);
 
             foreach (var sub in subShapes)

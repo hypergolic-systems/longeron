@@ -358,6 +358,15 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
     const JPH::RVec3 pos       = ReadDouble3(cur, end);
     const JPH::Quat  rot       = ReadFloat4Quat(cur, end);
     const float      mass      = Read<float>(cur, end);
+    // Initial linear + angular velocity in CB-frame. Critical for
+    // dynamic vessel bodies created on goOffRails: stock-side rb.velocity
+    // is set during unpack (orbit propagation → Vessel.GoOffRails →
+    // Part.SetWorldVelocity), and we must seed Jolt with that velocity
+    // or the vessel pops back into physics at v=0 and re-accelerates
+    // from zero. Static / kinematic ignore (kinematic motion is driven
+    // by SetKinematicPose; static is immobile).
+    const JPH::Vec3  lin_v     = ReadFloat3(cur, end);
+    const JPH::Vec3  ang_v     = ReadFloat3(cur, end);
     const uint8_t    shape_count = Read<uint8_t>(cur, end);
 
     if (mBodyRegistry.find(user_id) != mBodyRegistry.end()) {
@@ -432,6 +441,8 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
 
     JPH::BodyCreationSettings settings(body_shape, pos, rot, motion_type, obj_layer);
     settings.mUserData = static_cast<uint64_t>(user_id);
+    settings.mLinearVelocity  = lin_v;
+    settings.mAngularVelocity = ang_v;
 
     // Kinematic-vs-static and kinematic-vs-kinematic contact callbacks
     // are gated behind this flag in Jolt — Body.inl::sFindCollidingPairsCanCollide.

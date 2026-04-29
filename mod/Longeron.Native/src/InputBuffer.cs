@@ -133,12 +133,19 @@ namespace Longeron.Native
         // Wire layout for the BodyCreate record:
         //   tag(1) + user_id(4) + body_type(1) + layer(1) + group_id(4)
         //          + body_pos(double3=24) + body_rot(float4=16) + mass(4)
+        //          + lin_v(float3=12) + ang_v(float3=12)
         //          + shape_count(u8)
         //          + shape_count × {
         //              sub_pos(float3=12) + sub_rot(float4=16) + kind(u8)
         //              + kind-specific params (Box: 12, Sphere: 4,
         //                ConvexHull: 4 + 12·N)
         //            }
+        //
+        // lin_v / ang_v are in CB-frame, applied as
+        // BodyCreationSettings.mLinearVelocity / mAngularVelocity. Used
+        // to seed dynamic vessel bodies on goOffRails (unpack from
+        // rails); static / kinematic ignore (kinematic motion comes
+        // from SetKinematicPose).
         //
         // group_id semantics: 0 = collide with everything (terrain,
         // synthetic ground, anything outside any vessel). Non-zero =
@@ -167,11 +174,16 @@ namespace Longeron.Native
             BodyHandle body, BodyType bodyType, Layer layer,
             double posX, double posY, double posZ,
             float rotX, float rotY, float rotZ, float rotW,
-            float mass, byte shapeCount, uint groupId = 0)
+            float mass, byte shapeCount,
+            float linVx = 0f, float linVy = 0f, float linVz = 0f,
+            float angVx = 0f, float angVy = 0f, float angVz = 0f,
+            uint groupId = 0)
         {
             const int kPrefix = 1 /*tag*/ + 4 /*user_id*/ + 1 /*body_type*/ + 1 /*layer*/
                               + 4 /*group_id*/
-                              + 24 /*pos*/ + 16 /*rot*/ + 4 /*mass*/ + 1 /*shape_count*/;
+                              + 24 /*pos*/ + 16 /*rot*/ + 4 /*mass*/
+                              + 12 /*lin_v*/ + 12 /*ang_v*/
+                              + 1 /*shape_count*/;
             EnsureCapacity(kPrefix);
             byte* p = _ptr + _len;
             *p++ = (byte)RecordType.BodyCreate;
@@ -187,6 +199,12 @@ namespace Longeron.Native
             *(float*)p = rotZ;              p += 4;
             *(float*)p = rotW;              p += 4;
             *(float*)p = mass;              p += 4;
+            *(float*)p = linVx;             p += 4;
+            *(float*)p = linVy;             p += 4;
+            *(float*)p = linVz;             p += 4;
+            *(float*)p = angVx;             p += 4;
+            *(float*)p = angVy;             p += 4;
+            *(float*)p = angVz;             p += 4;
             *p++ = shapeCount;
             _len += kPrefix;
         }
