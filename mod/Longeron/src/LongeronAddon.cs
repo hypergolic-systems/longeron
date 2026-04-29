@@ -103,6 +103,7 @@ namespace Longeron
             var driver = GetComponent<LongeronSceneDriver>();
             if (driver != null) driver.NotifyWorldCreated();
             Streamer.AttachToAllPQS();
+            StaticSceneStreamer.MirrorAllPQSCities();
             foreach (var v in FlightGlobals.Vessels)
             {
                 if (v == null) continue;
@@ -135,6 +136,12 @@ namespace Longeron
             // in Jolt without waiting for the player to move.
             Streamer.AttachToAllPQS();
 
+            // Mirror PQSCity[2] static prefab geometry — KSC's
+            // launchpad concrete, runway tarmac, building shells.
+            // PQS terrain is the Kerbin sphere; this is the static
+            // overlay sitting on top of it.
+            StaticSceneStreamer.MirrorAllPQSCities();
+
             // Sweep already-unpacked vessels — VesselModule.OnGoOffRails
             // for these fired before ActiveWorld existed. Each vessel's
             // module instance can re-issue the register manually.
@@ -162,6 +169,13 @@ namespace Longeron
 
         static void DisposeWorld()
         {
+            // Tear down KSC static-mesh MonoBehaviours before the world
+            // dies. The bodies themselves are gone with the World; this
+            // sweep clears the components so a subsequent re-mirror on
+            // RebuildWorld doesn't trip the "already-mirrored" idempotency
+            // check on stale MonoBehaviours.
+            StaticBody.DestroyAll();
+
             if (ActiveWorld != null)
             {
                 ActiveWorld.Dispose();

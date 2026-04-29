@@ -1,20 +1,21 @@
 // LongeronSceneDriver — the per-FixedUpdate driver bracketing every
 // flight tick.
 //
-// Phase 1.5 responsibilities:
-//   - Mint a synthetic static ground body the first time we see a
-//     managed vessel (no real terrain mirroring yet — that's Phase 3).
-//   - Idempotently re-apply rb.isKinematic = true / useGravity = false
-//     on every managed part (the OnGoOffRails one-shot can race
-//     Part.Unpack and silently miss parts).
-//   - Build the per-tick input buffer:
-//       SetGravity from vessel.precalc.integrationAccel
-//       SetKinematicPose for each managed body, mirrored from the
-//         part's Unity Transform
+// Per-tick flow:
+//   - Reconcile any pending topology mutations (decouple, dock,
+//     joint break, body destroy queue from JoltBody/QuadBody/
+//     StaticBody OnDestroy) into the bridge input buffer.
+//   - Per-vessel pre-step setup: re-apply kinematic takeover (the
+//     OnGoOffRails one-shot can race Part.Unpack and silently miss
+//     parts), emit MassUpdates when total mass crosses threshold.
 //   - Step the bridge by Time.fixedDeltaTime.
-//   - Drain output: log contacts (rate-limited).
+//   - Drain output: per-vessel BodyPose → propagate to all member
+//     parts via captured local offsets; refresh derived velocity
+//     fields.
 //
-// Force redirect, mass updates, and pose readback are Phase 2.
+// Static collision (KSC + PQS terrain) is owned elsewhere:
+// PQSStreamer mirrors PQS terrain quads, StaticSceneStreamer mirrors
+// PQSCity static prefabs. This driver owns vessel motion only.
 
 using Longeron.Integration;
 using Longeron.Native;
@@ -27,13 +28,10 @@ namespace Longeron
     {
         const string LogPrefix = "[Longeron/driver] ";
 
-        bool _groundSpawned;
-
         // Called by LongeronAddon when a new flight-scene world is
         // created so per-world transient state resets.
         internal void NotifyWorldCreated()
         {
-            _groundSpawned = false;
             DiagLogger.Clear();
         }
 
@@ -71,10 +69,6 @@ namespace Longeron
             // Unity agreement. Useful for verifying the CB-frame mirror
             // is consistent with stock visual terrain.
             Streamer.LogVesselTerrainDiag();
-
-            // Spawn the synthetic ground once we have a vessel anchor.
-            if (!_groundSpawned)
-                TrySpawnSyntheticGround(world, frame);
 
             // Per-vessel pre-step setup.
             foreach (var mv in SceneRegistry.Vessels)
@@ -333,117 +327,5 @@ namespace Longeron
             v.angularVelocityD = v.angularVelocity;
         }
 
-        // Synthetic launchpad surrogate: a 50 m × 0.5 m × 50 m static
-        // box oriented perpendicular to gravity, placed just below
-        // the lowest part along the gravity direction. KSP's flight
-        // scene doesn't reorient the world to put +Y as "up" — Unity
-        // axes are absolute Kerbin-centric coords. So we anchor
-        // everything in the gravity vector, not Unity Y.
-        //
-        // Phase 3b replaces this with PQS streaming, but keep the
-        // synthetic ground until launchpad geometry capture is wired
-        // up (the launchpad itself isn't PQS — it's a PQSCity static
-        // prefab that we don't yet mirror).
-        //
-        // Compute pose in Unity world (using the live anchor / gravity
-        // vector), then convert to CB-frame at submission time so the
-        // body stays put in CB-frame as the planet rotates beneath it.
-        void TrySpawnSyntheticGround(World world, CbFrame frame)
-        {
-            // Pick the active vessel (or the first registered) as the
-            // gravity reference point — gravity varies with position,
-            // but for a single launchpad vessel this is a constant.
-            Vessel anchorVessel = null;
-            foreach (var mv in SceneRegistry.Vessels)
-            {
-                if (mv.Vessel != null && mv.Vessel.rootPart != null)
-                {
-                    anchorVessel = mv.Vessel;
-                    break;
-                }
-            }
-            if (anchorVessel == null) return;
-
-            Vector3 rootPos = anchorVessel.rootPart.transform.position;
-            Vector3d gd = FlightGlobals.getGeeForceAtPosition(rootPos);
-            Vector3 g = new Vector3((float)gd.x, (float)gd.y, (float)gd.z);
-            float gMag = g.magnitude;
-            if (gMag < 1e-3f)
-            {
-                Debug.LogWarning(LogPrefix + "no gravity at vessel position — skipping synthetic ground");
-                return;
-            }
-            Vector3 gDir = g / gMag;          // points "down"
-            Vector3 upDir = -gDir;            // points "up"
-
-            // Find the lowest collider point across all parts'
-            // bounds, projected along the gravity-up direction.
-            // Using collider AABBs (not just transform pivots)
-            // matches the actual geometry — engine bells extend well
-            // below their transform, and KSP placed the vessel so
-            // the lowest collider point IS at the launchpad surface.
-            // Spawning the synthetic ground exactly there puts the
-            // vessel at its natural rest height — no fall, no
-            // penetration, no buried-in-pad.
-            float lowestProj = float.PositiveInfinity;
-            foreach (var mv in SceneRegistry.Vessels)
-            {
-                if (mv.Vessel == null) continue;
-                foreach (var part in mv.Vessel.parts)
-                {
-                    if (part == null) continue;
-                    foreach (var col in part.GetComponentsInChildren<Collider>(includeInactive: false))
-                    {
-                        if (col == null || col.isTrigger || !col.enabled) continue;
-                        Bounds b = col.bounds;
-                        // The bounds are an AABB in world coords. The
-                        // extreme along -upDir is the most negative
-                        // dot of any of the 8 corners with upDir.
-                        // Cheap upper-bound: use bounds.center ±
-                        // bounds.extents projected onto upDir.
-                        float centerProj = Vector3.Dot(b.center - rootPos, upDir);
-                        float extentProj = Mathf.Abs(b.extents.x * upDir.x)
-                                         + Mathf.Abs(b.extents.y * upDir.y)
-                                         + Mathf.Abs(b.extents.z * upDir.z);
-                        float minProj = centerProj - extentProj;
-                        if (minProj < lowestProj) lowestProj = minProj;
-                    }
-                }
-            }
-            if (float.IsInfinity(lowestProj) || float.IsNaN(lowestProj)) lowestProj = 0f;
-
-            const float kHalfY = 0.25f;
-            // Ground top face exactly at the lowest collider point.
-            // Body center sits halfY below that.
-            Vector3 lowestPos    = rootPos + upDir * lowestProj;
-            Vector3 groundCenter = lowestPos + gDir * kHalfY;
-
-            // Rotation that maps the box's natural up (+Y_local) to
-            // the world's gravity-up direction.
-            Quaternion groundRot = Quaternion.FromToRotation(Vector3.up, upDir);
-
-            // Convert Unity-world pose → CB-frame for submission. The
-            // box stays anchored to its lat/lon/alt as the planet
-            // rotates because Jolt holds it in the rotating frame.
-            Vector3d centerCb = frame.WorldToCb(new Vector3d(groundCenter.x, groundCenter.y, groundCenter.z));
-            QuaternionD rotCb = frame.WorldToCb((QuaternionD)groundRot);
-
-            world.Input.WriteBodyCreateBox(
-                new BodyHandle(SceneRegistry.SyntheticGroundBodyId),
-                BodyType.Static, Layer.Static,
-                halfX: 25f, halfY: kHalfY, halfZ: 25f,
-                posX: centerCb.x, posY: centerCb.y, posZ: centerCb.z,
-                rotX: (float)rotCb.x, rotY: (float)rotCb.y, rotZ: (float)rotCb.z, rotW: (float)rotCb.w,
-                mass: 0f);
-
-            _groundSpawned = true;
-            Debug.Log(LogPrefix + string.Format(
-                "synthetic ground spawned: world=({0:F2},{1:F2},{2:F2}) cb=({3:F2},{4:F2},{5:F2}) up=({6:F2},{7:F2},{8:F2}) lowestProj={9:F2} — vessel '{10}'",
-                groundCenter.x, groundCenter.y, groundCenter.z,
-                centerCb.x, centerCb.y, centerCb.z,
-                upDir.x, upDir.y, upDir.z,
-                lowestProj,
-                anchorVessel.vesselName));
-        }
     }
 }

@@ -25,14 +25,11 @@ namespace Longeron.Integration
         static readonly Dictionary<Vessel, ManagedVessel> _vessels =
             new Dictionary<Vessel, ManagedVessel>();
 
-        // Reserved range:
-        //   1                — first synthetic ground (Phase 1.5)
-        //   2..              — vessel parts and any future ground bodies
-        // The synthetic-ground id is fixed so the driver can reference
-        // it without a lookup; vessel parts get sequentially-allocated
-        // ids from there on.
-        public const uint SyntheticGroundBodyId = 1;
-        static uint _nextBodyId = 2;
+        // Body handle ids start at 1 — BodyHandle 0 is reserved as
+        // Invalid by Longeron.Native. All bodies (vessel parts, KSC
+        // static colliders, PQS terrain quads) draw from this single
+        // monotonic counter.
+        static uint _nextBodyId = 1;
 
         // Constraint IDs are minted from a separate counter so the
         // namespaces don't collide. The native side keys constraints
