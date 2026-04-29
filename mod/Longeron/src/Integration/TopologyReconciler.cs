@@ -106,9 +106,20 @@ namespace Longeron.Integration
                 // any further AddForce calls land nowhere. The MonoBe-
                 // haviours stay on the Part GameObjects; they get
                 // re-attached below for the new body.
+                //
+                // Skip parts that have migrated to a different vessel
+                // (decouple, undock). Those parts already have a valid
+                // handle stamped by the new vessel's reconcile pass;
+                // clearing here would clobber it. Reconcile order
+                // across `_dirty` is HashSet-derived, so the parent
+                // can run after a child vessel and would otherwise
+                // race-clear its handles — manifests as decoupled
+                // boosters losing their separation impulse and
+                // "hanging in midair".
                 foreach (var p in mv.LastParts)
                 {
                     if (p == null || p.gameObject == null) continue;
+                    if (p.vessel != null && p.vessel != v) continue;
                     var jb = p.gameObject.GetComponent<JoltBody>();
                     if (jb != null) { jb.Handle = default; jb.OwnsBody = false; }
                 }
@@ -179,9 +190,13 @@ namespace Longeron.Integration
             if (mv.Body.IsValid)
             {
                 input.WriteBodyDestroy(mv.Body);
+                // Same migration guard as ReconcileVessel: don't clear
+                // handles for parts that have been adopted by a
+                // different vessel since LastParts was recorded.
                 foreach (var p in mv.LastParts)
                 {
                     if (p == null || p.gameObject == null) continue;
+                    if (p.vessel != null && p.vessel != v) continue;
                     var jb = p.gameObject.GetComponent<JoltBody>();
                     if (jb != null) { jb.Handle = default; jb.OwnsBody = false; }
                 }
