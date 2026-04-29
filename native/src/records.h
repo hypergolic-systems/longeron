@@ -32,7 +32,13 @@ enum class RecordType : uint8_t {
     ConstraintCreateFixedAt = 11,  // u32 cid, u8 kind, u32 body_a, u32 body_b, double3 anchor_world
                                    //   FixedConstraint with EConstraintSpace::WorldSpace; explicit
                                    //   anchor (KSP attach-node position in CB-frame coords) — better
-                                   //   PGS conditioning than mAutoDetectPoint=true.
+                                   //   PGS conditioning than mAutoDetectPoint=true. (Phase 2 multi-
+                                   //   body experiment; left here for inter-vessel future use.)
+    ForceAtPosition   = 12,  // u32 user_id, double3 force, double3 point_world
+                             //   Apply force at a specific CB-frame world point on the body. Native
+                             //   side computes (point - body_CoM) × force as the implicit torque.
+                             //   Used by the single-body-per-vessel model: every part's AddForce
+                             //   redirects to the vessel body at the part's CoM-or-attach-point.
 
     // ---- Output records (native → C#) ---------------------------------
     BodyPose          = 64,  // u32 user_id, double3 pos, float4 rot, float3 lin_vel, float3 ang_vel

@@ -1,23 +1,27 @@
 // TopologyReconciler — observes vessel structural mutations via
-// GameEvents and reconciles each dirty vessel's part tree against our
-// recorded ManagedVessel state, emitting the minimal bridge
-// mutations to make Jolt match.
+// GameEvents and reconciles each dirty vessel against our recorded
+// ManagedVessel state. Single-body model: one Jolt body per vessel.
 //
-// Why diff-based reconciliation over per-method Harmony postfixes:
+// Why diff-based reconciliation:
 //   - One subscription set covers every stock and modded mutation
-//     path. Decouple, Couple, dock, joint break, KAS hooks all funnel
-//     through Part.Couple / Part.decouple / PartJoint.DestroyJoint
-//     which fire onVesselWasModified.
+//     path (decouple, couple, dock, joint break, fairing eject all
+//     funnel through onVesselWasModified).
 //   - Idempotent: multiple events on the same vessel within one tick
 //     collapse to one diff.
-//   - Order-independent: onVesselWasModified(old) and
-//     onVesselCreate(new) from a decouple can fire in either order;
-//     the reconciler observes final state.
+//   - Order-independent: onVesselWasModified(old) and onVesselCreate
+//     (new) from a decouple can fire in either order; reconciliation
+//     observes final state.
 //
-// Body destruction is NOT this class's concern — JoltBody.OnDestroy
-// queues BodyDestroy records when Unity destroys a Part GameObject
-// (crash, splash damage, fairing despawn). Reconcile() drains that
-// queue at the start of each pass.
+// On any topology change (parts added or removed from a vessel since
+// last reconcile), the entire vessel body is rebuilt: BodyDestroy +
+// BodyCreate with the new compound shape. Cheap relative to the
+// dynamic-step cost on a typical KSP rocket. Phase 4 (Featherstone
+// ABA) computes joint forces post-hoc from the same single body's
+// motion, decomposing into per-edge stresses for break detection.
+//
+// Body destruction for unexpected GameObject teardown (crash, splash
+// damage, scene exit) is handled by JoltBody.OnDestroy → pending
+// destroy queue, drained at the start of every reconcile pass.
 
 using System.Collections.Generic;
 using Longeron.Native;
@@ -30,6 +34,10 @@ namespace Longeron.Integration
         const string LogPrefix = "[Longeron/Reconciler] ";
 
         static readonly HashSet<Vessel> _dirty = new HashSet<Vessel>();
+
+        // Reused per-call to avoid allocations on the hot path.
+        static readonly Dictionary<Part, ManagedVessel.PartOffset> _offsetScratch =
+            new Dictionary<Part, ManagedVessel.PartOffset>(64);
 
         public static void MarkDirty(Vessel v)
         {
@@ -46,19 +54,12 @@ namespace Longeron.Integration
         // LongeronSceneDriver.FixedUpdate before per-vessel pre-step
         // setup so all topology mutations land in the same input
         // buffer as the per-tick pose / force records.
-        //
-        // CbFrame is passed through to ColliderWalker so part poses
-        // get baked in CB-frame coords before submission.
         public static void Reconcile(InputBuffer input, CbFrame frame)
         {
             JoltBody.DrainPendingDestroys(input);
 
             if (_dirty.Count == 0) return;
 
-            // Snapshot to a buffer so MarkDirty can fire mid-iteration
-            // (e.g., reconciling vessel A could trigger something that
-            // queues vessel B for next tick — we don't want to process
-            // B in this same call).
             var pending = new List<Vessel>(_dirty);
             _dirty.Clear();
 
@@ -67,8 +68,7 @@ namespace Longeron.Integration
 
         static void ReconcileVessel(Vessel v, InputBuffer input, CbFrame frame)
         {
-            // End-of-life: vessel is dead or fully destroyed. Tear down
-            // any bodies/constraints we held for it.
+            // End-of-life: vessel is dead. Tear down its body if held.
             if (v == null || v.state == Vessel.State.DEAD)
             {
                 if (v != null && SceneRegistry.TryGet(v, out var mvDead))
@@ -76,163 +76,116 @@ namespace Longeron.Integration
                 return;
             }
 
-            // Not physics-active: don't touch it. If we held state
-            // previously, OnGoOnRails has the synchronous tear-down
-            // path and would have run already.
+            // Not physics-active: don't touch it. OnGoOnRails has the
+            // synchronous tear-down path and would have run already.
             if (!v.loaded || v.packed) return;
 
             bool firstTime = !SceneRegistry.TryGet(v, out var mv);
             if (firstTime) mv = SceneRegistry.Register(v);
 
-            int bodiesAdded = 0, bodiesMigrated = 0, bodiesRemoved = 0;
-            int edgesAdded = 0, edgesRemoved = 0;
+            // Compare current parts to last-seen.
+            var current = new HashSet<Part>();
+            foreach (var p in v.parts) if (p != null) current.Add(p);
 
-            // ----- Diff parts -----
-            var expectedParts = new HashSet<Part>(v.parts);
+            bool topologyChanged = firstTime
+                                   || !current.SetEquals(mv.LastParts);
 
-            // Remove parts no longer in this vessel. Don't issue
-            // BodyDestroy here — the JoltBody MonoBehaviour stays alive
-            // on the GameObject and another reconciliation may claim
-            // the part (decouple → new vessel). If the part is truly
-            // destroyed, JoltBody.OnDestroy queues the BodyDestroy.
-            // We just relinquish the (Part → BodyHandle) mapping in
-            // this ManagedVessel.
-            var staleParts = new List<Part>();
-            foreach (var kv in mv.Bodies)
-                if (!expectedParts.Contains(kv.Key)) staleParts.Add(kv.Key);
-            foreach (var p in staleParts)
+            if (!topologyChanged) return;
+
+            // Topology diff detected → rebuild the vessel body from
+            // scratch. Destroy any prior body (the reconciler-level
+            // destroy is for the case where the body still exists but
+            // its part composition has changed; the JoltBody.OnDestroy
+            // queue handles the case where the owning Part GameObject
+            // itself was destroyed).
+            if (mv.Body.IsValid)
             {
-                mv.RemoveBody(p);
-                bodiesRemoved++;
-            }
-
-            // Add parts new to this vessel. Migrated parts (those whose
-            // GameObject already has a JoltBody from a previous
-            // ManagedVessel) re-use the existing BodyHandle — no
-            // BodyCreate emitted. Truly new parts mint a fresh body.
-            foreach (var part in v.parts)
-            {
-                if (part == null) continue;
-                if (mv.Bodies.ContainsKey(part)) continue;
-
-                var existingJb = part.gameObject != null
-                    ? part.gameObject.GetComponent<JoltBody>()
-                    : null;
-                if (existingJb != null && existingJb.Handle.IsValid)
+                input.WriteBodyDestroy(mv.Body);
+                mv.Body = default;
+                // Detach the JoltBody handle on every former member so
+                // any further AddForce calls land nowhere. The MonoBe-
+                // haviours stay on the Part GameObjects; they get
+                // re-attached below for the new body.
+                foreach (var p in mv.LastParts)
                 {
-                    // Migrated part: re-use the existing Jolt body but
-                    // update its collision filter group to this
-                    // vessel's. Without this, decoupled parts retain
-                    // their original vessel's group ID and the
-                    // GroupFilterTable rejects collisions with the
-                    // post-decouple parent vessel ("same group +
-                    // same SubGroupID = no collide").
-                    mv.AddBody(part, existingJb.Handle);
-                    input.WriteSetBodyGroup(existingJb.Handle, mv.GroupId);
-                    bodiesMigrated++;
-                }
-                else
-                {
-                    float mass = part.mass + part.GetResourceMass();
-                    if (mass < 1e-6f) mass = 0.01f;
-
-                    var handle = SceneRegistry.MintBodyHandle();
-                    bool ok = ColliderWalker.WriteBodyFor(
-                        input, handle, part,
-                        BodyType.Dynamic, Layer.Kinematic, mass,
-                        groupId: mv.GroupId,
-                        frame: frame);
-                    if (!ok) continue;
-
-                    mv.AddBody(part, handle);
-                    var jb = JoltBody.AttachTo(part, handle);
-                    if (jb != null) jb.LastMass = mass;
-                    bodiesAdded++;
+                    if (p == null || p.gameObject == null) continue;
+                    var jb = p.gameObject.GetComponent<JoltBody>();
+                    if (jb != null) { jb.Handle = default; jb.OwnsBody = false; }
                 }
             }
 
-            // ----- Diff edges (parent-child only for Phase 2) -----
-            var expectedEdges = new HashSet<(Part, Part)>();
-            foreach (var part in v.parts)
+            // Compute aggregate mass and emit a fresh body.
+            float totalMass = 0f;
+            foreach (var p in current)
             {
-                if (part?.parent == null) continue;
-                if (!expectedParts.Contains(part.parent)) continue;
-                expectedEdges.Add((part.parent, part));
+                float m = p.mass + p.GetResourceMass();
+                if (m > 0f) totalMass += m;
+            }
+            if (totalMass < 1e-6f) totalMass = 0.01f;
+
+            var newHandle = SceneRegistry.MintBodyHandle();
+            bool ok = ColliderWalker.WriteBodyForVessel(
+                input, newHandle, v,
+                BodyType.Dynamic, Layer.Kinematic,
+                totalMass, mv.GroupId,
+                frame, _offsetScratch);
+            if (!ok)
+            {
+                Debug.LogWarning(LogPrefix + $"vessel '{v.vesselName}' produced no usable colliders; skipping body create");
+                mv.LastParts.Clear();
+                mv.PartOffsets.Clear();
+                mv.LastMass = 0f;
+                return;
             }
 
-            // Edges no longer present (parent re-assigned, child gone, etc.)
-            var staleEdges = new List<(Part, Part)>();
-            foreach (var key in mv.ConstraintEdges.Keys)
-                if (!expectedEdges.Contains(key)) staleEdges.Add(key);
-            foreach (var key in staleEdges)
+            // Record state and stamp the handle on every part. Root
+            // part owns the body (its OnDestroy will queue the
+            // BodyDestroy if the GameObject dies); other parts share
+            // the handle for force redirection + pose propagation.
+            mv.Body = newHandle;
+            mv.LastParts.Clear();
+            foreach (var p in current) mv.LastParts.Add(p);
+            mv.PartOffsets.Clear();
+            foreach (var kv in _offsetScratch) mv.PartOffsets[kv.Key] = kv.Value;
+            mv.LastMass = totalMass;
+
+            var root = v.rootPart;
+            foreach (var p in current)
             {
-                if (mv.RemoveEdge(key.Item1, key.Item2, out var cid))
+                if (p == null || p.gameObject == null) continue;
+                bool isRoot = (p == root);
+                var jb = JoltBody.AttachTo(p, newHandle, ownsBody: isRoot);
+                if (jb == null) continue;
+                if (mv.PartOffsets.TryGetValue(p, out var off))
                 {
-                    input.WriteConstraintDestroy(cid);
-                    edgesRemoved++;
+                    jb.PartLocalPos = off.LocalPos;
+                    jb.PartLocalRot = off.LocalRot;
                 }
+                jb.LastMass = p.mass + p.GetResourceMass();
             }
 
-            // Edges newly present
-            foreach (var edge in expectedEdges)
-            {
-                if (mv.ConstraintEdges.ContainsKey(edge)) continue;
-                if (!mv.Bodies.TryGetValue(edge.Item1, out var parentH)) continue;
-                if (!mv.Bodies.TryGetValue(edge.Item2, out var childH)) continue;
-
-                uint cid = SceneRegistry.MintConstraintId();
-                if (AttachAnchors.TryResolveWorld(edge.Item2, edge.Item1, out var anchorWorld))
-                {
-                    // Convert Unity-world anchor → CB-frame, matching
-                    // the body coordinate system the native side uses.
-                    Vector3d anchorCb = frame.WorldToCb(new Vector3d(
-                        anchorWorld.x, anchorWorld.y, anchorWorld.z));
-                    input.WriteConstraintCreateFixedAt(
-                        cid, parentH, childH,
-                        anchorCb.x, anchorCb.y, anchorCb.z);
-                    Debug.Log(LogPrefix + string.Format(
-                        "edge cid={0} {1} -> {2} anchorWorld=({3:F2},{4:F2},{5:F2}) anchorCb=({6:F2},{7:F2},{8:F2})",
-                        cid,
-                        edge.Item1?.partInfo?.name ?? "?",
-                        edge.Item2?.partInfo?.name ?? "?",
-                        anchorWorld.x, anchorWorld.y, anchorWorld.z,
-                        anchorCb.x, anchorCb.y, anchorCb.z));
-                }
-                else
-                {
-                    // Fallback: modded attachment paths (KAS, etc.) that
-                    // don't populate AttachNode pairings. Auto-detect
-                    // anchor at midpoint-of-CoMs preserves prior behavior.
-                    Debug.LogWarning(LogPrefix + $"no attach-node anchor for edge "
-                                     + $"{edge.Item1?.partInfo?.name ?? "?"} -> "
-                                     + $"{edge.Item2?.partInfo?.name ?? "?"} — "
-                                     + "falling back to autoDetect constraint");
-                    input.WriteConstraintCreateFixed(cid, parentH, childH);
-                }
-                mv.AddEdge(edge.Item1, edge.Item2, cid);
-                edgesAdded++;
-            }
-
-            // Idempotently re-apply kinematic takeover. Newly-added
-            // parts may not have had their rigidbodies stamped yet
-            // (Vessel.Unpack races OnGoOffRails for the first frame).
+            // Idempotently re-apply kinematic takeover for any newly-
+            // unpacked rigidbodies that haven't been stamped yet.
             LongeronVesselModule.ApplyKinematicTakeover(v);
 
-            if (firstTime || bodiesAdded + bodiesMigrated + bodiesRemoved + edgesAdded + edgesRemoved > 0)
-            {
-                Debug.Log(LogPrefix + string.Format(
-                    "{0} '{1}': +{2} body, ~{3} migrated, -{4} body, +{5} edge, -{6} edge",
-                    firstTime ? "first-register" : "reconcile",
-                    v.vesselName,
-                    bodiesAdded, bodiesMigrated, bodiesRemoved,
-                    edgesAdded, edgesRemoved));
-            }
+            Debug.Log(LogPrefix + string.Format(
+                "{0} '{1}': {2} part(s), mass={3:F2}t, body={4}",
+                firstTime ? "first-register" : "rebuild",
+                v.vesselName, current.Count, totalMass, newHandle.Id));
         }
 
         static void TearDown(ManagedVessel mv, InputBuffer input, Vessel v)
         {
-            foreach (var cid in mv.ConstraintIds) input.WriteConstraintDestroy(cid);
-            foreach (var h in mv.BodyHandles) input.WriteBodyDestroy(h);
+            if (mv.Body.IsValid)
+            {
+                input.WriteBodyDestroy(mv.Body);
+                foreach (var p in mv.LastParts)
+                {
+                    if (p == null || p.gameObject == null) continue;
+                    var jb = p.gameObject.GetComponent<JoltBody>();
+                    if (jb != null) { jb.Handle = default; jb.OwnsBody = false; }
+                }
+            }
             SceneRegistry.Unregister(v, out _);
             Debug.Log(LogPrefix + $"teardown '{(v != null ? v.vesselName : "<dead>")}'");
         }

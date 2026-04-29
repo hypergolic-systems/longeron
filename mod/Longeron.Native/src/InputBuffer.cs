@@ -25,6 +25,7 @@ namespace Longeron.Native
         ShiftWorld        = 9,
         SetBodyGroup      = 10,
         ConstraintCreateFixedAt = 11,
+        ForceAtPosition   = 12,
 
         // Output-only:
         BodyPose          = 64,
@@ -427,6 +428,30 @@ namespace Longeron.Native
             *(double*)p = tx;               p += 8;
             *(double*)p = ty;               p += 8;
             *(double*)p = tz;               p += 8;
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Apply a force at a specific world-space point on the body
+        /// (CB-frame coords). Native side computes the implicit torque
+        /// from (point - body_CoM) × force. Layout: tag(1) + body_id(4)
+        /// + force(double3=24) + point(double3=24) = 53 bytes.
+        /// </summary>
+        public void WriteForceAtPosition(BodyHandle body,
+                                         double fx, double fy, double fz,
+                                         double px, double py, double pz)
+        {
+            const int kSize = 53;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.ForceAtPosition;
+            *(uint*)p = body.Id;            p += 4;
+            *(double*)p = fx;               p += 8;
+            *(double*)p = fy;               p += 8;
+            *(double*)p = fz;               p += 8;
+            *(double*)p = px;               p += 8;
+            *(double*)p = py;               p += 8;
+            *(double*)p = pz;               p += 8;
             _len += kSize;
         }
 

@@ -24,8 +24,22 @@ namespace Longeron
     [DisallowMultipleComponent]
     public sealed class JoltBody : MonoBehaviour
     {
+        // Single-body model: every Part in a vessel shares the SAME
+        // BodyHandle (the vessel's). Only the OwnsBody == true part
+        // (the vessel root at body-create time) is responsible for
+        // BodyDestroy on cleanup; non-owners' OnDestroy is a no-op
+        // because their resource is co-owned by the vessel body.
         public BodyHandle Handle;
         public Part Part;
+        public bool OwnsBody;
+
+        // Offset from the vessel root at body-create time, in the
+        // root's local frame. Used by LongeronSceneDriver to derive
+        // each part's Unity-world pose from the single Jolt body's
+        // pose. Captured once when the part joins a vessel; refreshed
+        // when the vessel body is rebuilt (decouple, dock, etc.).
+        public Vector3 PartLocalPos;
+        public Quaternion PartLocalRot = Quaternion.identity;
 
         // The latest analytic Jolt-integrated velocity for this part,
         // stored at pose readback. Unity silently discards rb.velocity
@@ -36,10 +50,10 @@ namespace Longeron
         public Vector3 LastVelocity;
         public Vector3 LastAngularVelocity;
 
-        // Tonnes (KSP convention). Compared against
-        // `part.mass + part.GetResourceMass()` each tick by the
-        // driver; when it differs by more than a threshold, a
-        // MassUpdate record is queued and this is updated.
+        // Tonnes (KSP convention). Tracked per-part so the driver can
+        // detect mass deltas; aggregated to per-vessel for the actual
+        // MassUpdate record (single-body model uses one vessel mass,
+        // not per-part).
         public float LastMass;
 
         // Pending body destroys from GameObjects Unity has destroyed
@@ -56,13 +70,27 @@ namespace Longeron
         static readonly Dictionary<uint, JoltBody> _byHandle =
             new Dictionary<uint, JoltBody>();
 
-        public static JoltBody AttachTo(Part part, BodyHandle handle)
+        // Attach a JoltBody component to the given Part. Pass
+        // ownsBody=true on the vessel root (the part whose transform
+        // anchored the BodyCreate); pass false on every other part in
+        // the vessel — they share the handle but don't own the
+        // lifetime. Local pose offsets default to identity; caller
+        // should set them after attach.
+        //
+        // For single-body, multiple parts register against the same
+        // handle. _byHandle stores only the *owner* JoltBody so the
+        // reverse lookup (handle → JoltBody → Vessel) goes through
+        // the root part — output records like BodyPose are
+        // vessel-level and only the owner needs to receive them.
+        public static JoltBody AttachTo(Part part, BodyHandle handle, bool ownsBody)
         {
             if (part == null || part.gameObject == null) return null;
-            var jb = part.gameObject.AddComponent<JoltBody>();
+            var jb = part.gameObject.GetComponent<JoltBody>();
+            if (jb == null) jb = part.gameObject.AddComponent<JoltBody>();
             jb.Handle = handle;
             jb.Part = part;
-            _byHandle[handle.Id] = jb;
+            jb.OwnsBody = ownsBody;
+            if (ownsBody) _byHandle[handle.Id] = jb;
             return jb;
         }
 
@@ -82,7 +110,14 @@ namespace Longeron
 
         void OnDestroy()
         {
-            if (Handle.IsValid)
+            // Only the owning part's destruction tears down the Jolt
+            // body — non-owner parts share the resource and shouldn't
+            // free it. Topology mutations (decouple, joint break) go
+            // through TopologyReconciler which destroys + rebuilds the
+            // body explicitly, so this path only fires when the entire
+            // owning part GameObject is destroyed (crash, splash damage,
+            // scene exit).
+            if (OwnsBody && Handle.IsValid)
             {
                 _pendingDestroy.Enqueue(Handle);
                 _byHandle.Remove(Handle.Id);

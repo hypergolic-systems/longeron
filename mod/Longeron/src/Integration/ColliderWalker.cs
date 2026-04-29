@@ -42,6 +42,101 @@ namespace Longeron.Integration
         // The part's anchor pose is captured in Unity world and converted
         // to CB-frame via the supplied CbFrame before submission. Sub-
         // shape transforms are part-local and frame-invariant.
+        // Single-body-per-vessel: build one Jolt body whose compound
+        // shape contains every part's colliders, all transformed into
+        // the vessel root part's local frame. Body anchor pose = root
+        // part's transform (CB-frame).
+        //
+        // Caller passes a pre-allocated dict that will be populated
+        // with per-part (LocalPos, LocalRot) offsets relative to the
+        // root — used by LongeronSceneDriver to derive each part's
+        // Unity-world pose from the single body's pose readback.
+        //
+        // Returns true if the body was emitted; false if the vessel
+        // had no usable colliders (caller should skip registration).
+        public static bool WriteBodyForVessel(
+            InputBuffer input,
+            BodyHandle handle,
+            Vessel vessel,
+            BodyType bodyType,
+            Layer layer,
+            float totalMassKg,
+            uint groupId,
+            CbFrame frame,
+            Dictionary<Part, ManagedVessel.PartOffset> outPartOffsets)
+        {
+            if (vessel == null || vessel.rootPart == null) return false;
+            var root = vessel.rootPart;
+            var rootXform = root.transform;
+            if (rootXform == null) return false;
+
+            // Body anchor = root part's transform in CB-frame.
+            Vector3d rootCbPos = frame.WorldToCb(new Vector3d(
+                rootXform.position.x, rootXform.position.y, rootXform.position.z));
+            QuaternionD rootCbRot = frame.WorldToCb((QuaternionD)rootXform.rotation);
+
+            var subShapes = new List<SubShape>(64);
+            outPartOffsets.Clear();
+
+            foreach (var part in vessel.parts)
+            {
+                if (part == null) continue;
+                var partXform = part.transform;
+                if (partXform == null) continue;
+
+                // Record this part's offset from root, captured in
+                // root-local space and frozen until the next rebuild.
+                var offset = new ManagedVessel.PartOffset
+                {
+                    LocalPos = rootXform.InverseTransformPoint(partXform.position),
+                    LocalRot = Quaternion.Inverse(rootXform.rotation) * partXform.rotation,
+                };
+                outPartOffsets[part] = offset;
+
+                // Walk this part's colliders and project them into
+                // ROOT-local space (not part-local) so all sub-shapes
+                // share a single body frame.
+                var colliders = part.GetComponentsInChildren<Collider>(includeInactive: true);
+                foreach (var col in colliders)
+                {
+                    if (col == null) continue;
+                    if (col.isTrigger) continue;
+                    if (!col.enabled) continue;
+                    if (col.gameObject == null || !col.gameObject.activeInHierarchy) continue;
+                    if (col.GetType().Name == "WheelCollider") continue;  // Phase 3.5
+
+                    if (TryClassify(col, rootXform, out var sub))
+                        subShapes.Add(sub);
+                }
+            }
+
+            if (subShapes.Count == 0)
+            {
+                Debug.Log(LogPrefix + $"vessel '{vessel.vesselName}' has no usable colliders — skipping body");
+                return false;
+            }
+
+            if (subShapes.Count > 255)
+            {
+                Debug.LogWarning(LogPrefix + $"vessel '{vessel.vesselName}' has {subShapes.Count} colliders, capping at 255");
+                subShapes.RemoveRange(255, subShapes.Count - 255);
+            }
+
+            input.BeginBodyCreate(
+                handle, bodyType, layer,
+                posX: rootCbPos.x, posY: rootCbPos.y, posZ: rootCbPos.z,
+                rotX: (float)rootCbRot.x, rotY: (float)rootCbRot.y,
+                rotZ: (float)rootCbRot.z, rotW: (float)rootCbRot.w,
+                mass: totalMassKg,
+                shapeCount: (byte)subShapes.Count,
+                groupId: groupId);
+
+            foreach (var sub in subShapes)
+                AppendSubShape(input, sub);
+
+            return true;
+        }
+
         public static bool WriteBodyFor(
             InputBuffer input,
             BodyHandle handle,

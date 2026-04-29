@@ -62,6 +62,7 @@ private:
     void HandleSetGravity(const uint8_t*& cur, const uint8_t* end);
     void HandleSetKinematicPose(const uint8_t*& cur, const uint8_t* end);
     void HandleForceDelta(const uint8_t*& cur, const uint8_t* end);
+    void HandleForceAtPosition(const uint8_t*& cur, const uint8_t* end);
     void HandleConstraintCreate(const uint8_t*& cur, const uint8_t* end);
     void HandleConstraintCreateFixedAt(const uint8_t*& cur, const uint8_t* end);
     void HandleConstraintDestroy(const uint8_t*& cur, const uint8_t* end);

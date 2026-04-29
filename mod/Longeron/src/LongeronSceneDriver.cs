@@ -103,10 +103,11 @@ namespace Longeron
                 return;
             }
 
-            // Drain output. BodyPose records → write each part's
-            // Unity rigidbody. ContactReport records are read but not
-            // currently consumed downstream — Phase 4 will wire them
-            // into ABA's external-wrench input.
+            // Drain output. Single-body model: one BodyPose per vessel.
+            // The handle's reverse lookup gives us the vessel root
+            // JoltBody (only the owner is registered in _byHandle); we
+            // propagate the vessel's pose to every member part by
+            // composing with the captured local offsets.
             RecordType type;
             while ((type = world.Output.Next()) != RecordType.None)
             {
@@ -114,9 +115,10 @@ namespace Longeron
                 {
                     case RecordType.BodyPose:
                         world.Output.ReadBodyPose(out var pose);
-                        if (JoltBody.TryGet(pose.Body.Id, out var jb)
-                            && jb.Part != null && jb.Part.rb != null)
-                            ApplyPoseToRigidbody(jb.Part.rb, pose, frame);
+                        if (JoltBody.TryGet(pose.Body.Id, out var ownerJb)
+                            && ownerJb.Part != null
+                            && ownerJb.Part.vessel != null)
+                            ApplyVesselPose(ownerJb.Part.vessel, pose, frame);
                         break;
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out _);
@@ -153,62 +155,91 @@ namespace Longeron
         // accumulation bunch up before we emit.
         const float kMassChangeThresholdTonnes = 1e-6f;
 
+        // Single-body mass aggregation: sum every part's mass +
+        // resources, compare to the per-vessel cached total, emit one
+        // MassUpdate when the delta crosses the threshold. Per-part
+        // jb.LastMass is also updated so the per-tick delta detection
+        // remains stable across topology changes.
         static void EmitMassUpdates(Integration.ManagedVessel mv, Native.InputBuffer input)
         {
-            foreach (var kv in mv.Bodies)
+            if (!mv.Body.IsValid || mv.Vessel == null) return;
+
+            float total = 0f;
+            foreach (var part in mv.Vessel.parts)
             {
-                var part = kv.Key;
-                if (part?.gameObject == null) continue;
+                if (part == null) continue;
+                float m = part.mass + part.GetResourceMass();
+                if (m > 0f) total += m;
 
-                var jb = part.gameObject.GetComponent<JoltBody>();
-                if (jb == null) continue;
-
-                float currentMass = part.mass + part.GetResourceMass();
-                if (currentMass < 1e-6f) currentMass = 0.01f;
-
-                if (System.Math.Abs(currentMass - jb.LastMass) < kMassChangeThresholdTonnes)
-                    continue;
-
-                input.WriteMassUpdate(jb.Handle, currentMass);
-                jb.LastMass = currentMass;
+                var jb = part.gameObject != null
+                    ? part.gameObject.GetComponent<JoltBody>()
+                    : null;
+                if (jb != null) jb.LastMass = m;
             }
+            if (total < 1e-6f) total = 0.01f;
+
+            if (System.Math.Abs(total - mv.LastMass) < kMassChangeThresholdTonnes)
+                return;
+
+            input.WriteMassUpdate(mv.Body, total);
+            mv.LastMass = total;
         }
 
-        // Apply Jolt's integrated CB-frame pose + velocity to a Unity
-        // Rigidbody.
+        // Single-body pose propagation. The BodyPose record carries the
+        // vessel-level pose at the body's anchor (= vessel root part's
+        // transform position at body-create time). We compose this
+        // pose with each part's frozen LocalPos / LocalRot offset to
+        // derive the per-part Unity rb pose for stock-code consumers.
         //
-        // Pose record is in CB-fixed (rotating) frame. Convert through
-        // the boundary transform to Unity world coordinates before
-        // writing rb.{position,rotation,velocity,angularVelocity}.
+        // The vessel is rigid by construction (single body, no internal
+        // DOF), so part offsets stay constant until the next topology
+        // rebuild.
         //
-        // Velocity convention: CbVelToWorld(v_cb, p) returns the
-        // Krakensbane-adjusted Unity-world velocity — V_inertial − FrameVel
-        // (with FrameVel ≡ 0 once Krakensbane is patched out in Step 2).
-        // Subsequent stock reads through velocityD = rb.velocity +
-        // FrameVel recover V_inertial.
-        //
-        // The setter goes through Patch_Rigidbody_SetVelocity into
-        // JoltBody.LastVelocity, so RefreshVesselVelocityFields can
-        // reconstruct vessel-level fields from the same Krakensbane-
-        // adjusted Unity velocity.
-        static void ApplyPoseToRigidbody(Rigidbody rb, BodyPoseRecord pose, CbFrame frame)
+        // Velocity propagation: rb at offset r from the body's reference
+        // point has v(r) = v_anchor + ω × r — standard rigid-body
+        // kinematics. We use the vessel's body-frame pose to express r
+        // in world axes.
+        static void ApplyVesselPose(Vessel v, BodyPoseRecord pose, CbFrame frame)
         {
             Vector3d posCb = new Vector3d(pose.PosX, pose.PosY, pose.PosZ);
             Vector3d posWorld = frame.CbToWorld(posCb);
-
             QuaternionD rotCb = new QuaternionD(pose.RotX, pose.RotY, pose.RotZ, pose.RotW);
-            QuaternionD rotWorld = frame.CbToWorld(rotCb);
+            QuaternionD rotWorldD = frame.CbToWorld(rotCb);
+            Quaternion rotWorld = (Quaternion)rotWorldD;
 
             Vector3d velCb = new Vector3d(pose.LinX, pose.LinY, pose.LinZ);
             Vector3d velWorld = frame.CbVelToWorld(velCb, posWorld);
 
             Vector3d angCb = new Vector3d(pose.AngX, pose.AngY, pose.AngZ);
             Vector3d angWorld = frame.CbAngVelToWorld(angCb);
+            Vector3 angWorldF = (Vector3)angWorld;
 
-            rb.position        = (Vector3)posWorld;
-            rb.rotation        = (Quaternion)rotWorld;
-            rb.velocity        = (Vector3)velWorld;
-            rb.angularVelocity = (Vector3)angWorld;
+            Vector3 anchorWorld = (Vector3)posWorld;
+            Vector3 anchorVel = (Vector3)velWorld;
+
+            foreach (var part in v.parts)
+            {
+                if (part == null) continue;
+                var rb = part.rb;
+                if (rb == null) continue;
+                var jb = part.gameObject != null
+                    ? part.gameObject.GetComponent<JoltBody>()
+                    : null;
+                if (jb == null) continue;
+
+                Vector3 rWorld = rotWorld * jb.PartLocalPos;
+                Vector3 partPos = anchorWorld + rWorld;
+                Quaternion partRot = rotWorld * jb.PartLocalRot;
+                Vector3 partVel = anchorVel + Vector3.Cross(angWorldF, rWorld);
+
+                rb.position        = partPos;
+                rb.rotation        = partRot;
+                rb.velocity        = partVel;
+                rb.angularVelocity = angWorldF;
+
+                jb.LastVelocity        = partVel;
+                jb.LastAngularVelocity = angWorldF;
+            }
         }
 
 

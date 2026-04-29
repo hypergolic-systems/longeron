@@ -61,15 +61,10 @@ namespace Longeron
             if (!SceneRegistry.Unregister(vessel, out var managed)) return;
 
             var world = LongeronAddon.ActiveWorld;
-            if (world != null)
+            if (world != null && managed.Body.IsValid)
             {
-                // Constraints first (they reference bodies), then
-                // bodies. Order matches the destructor in
-                // LongeronWorld.
-                foreach (var cid in managed.ConstraintIds)
-                    world.Input.WriteConstraintDestroy(cid);
-                foreach (var h in managed.BodyHandles)
-                    world.Input.WriteBodyDestroy(h);
+                // Single-body model: one BodyDestroy per vessel.
+                world.Input.WriteBodyDestroy(managed.Body);
             }
 
             // Restore rigidbodies to stock-physics defaults.
@@ -83,7 +78,7 @@ namespace Longeron
                 // useGravity = false everywhere anyway.
             }
 
-            Debug.Log(LogPrefix + $"released '{vessel.vesselName}': {managed.Bodies.Count} body destroy(s) queued");
+            Debug.Log(LogPrefix + $"released '{vessel.vesselName}': {managed.LastParts.Count} part(s)");
         }
 
         public static void ApplyKinematicTakeover(Vessel v)

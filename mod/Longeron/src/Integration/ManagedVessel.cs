@@ -1,10 +1,18 @@
-// Per-vessel state held by SceneRegistry. Tracks the Part ↔ BodyHandle
-// mapping and the (parent, child) ↔ ConstraintId mapping so the
-// reconciler can diff against the vessel's current part tree each
-// FixedUpdate and emit minimal mutations.
+// Per-vessel state held by SceneRegistry. Single-body model: one Jolt
+// body per vessel. Bodies dict + ConstraintEdges from the multi-body
+// era are gone.
+//
+// Tracks:
+//   - The vessel's BodyHandle (single).
+//   - Per-part offsets from the vessel root (in root-local coords) so
+//     the scene driver can derive each part's Unity-world pose from
+//     the body's pose.
+//   - The set of parts contributing to the body, used for change
+//     detection during reconcile.
 
 using System.Collections.Generic;
 using Longeron.Native;
+using UnityEngine;
 
 namespace Longeron.Integration
 {
@@ -13,62 +21,36 @@ namespace Longeron.Integration
         public Vessel Vessel { get; }
         public uint GroupId { get; }
 
-        // Part → its Jolt body. Keyed for O(1) reconciliation diffs.
-        public Dictionary<Part, BodyHandle> Bodies { get; }
-            = new Dictionary<Part, BodyHandle>();
+        // Vessel-level Jolt body handle. Invalid until first BodyCreate.
+        public BodyHandle Body;
 
-        // (parent, child) → constraint id. Tuple keys let the
-        // reconciler detect re-parenting (a child whose parent
-        // changed mid-flight needs the old edge destroyed and the new
-        // one created), and tag-by-edge means we don't need a
-        // separate part-pair → constraint lookup.
-        public Dictionary<(Part Parent, Part Child), uint> ConstraintEdges { get; }
-            = new Dictionary<(Part, Part), uint>();
+        // Each part's offset from the vessel root, captured at
+        // BodyCreate time and held constant until the next rebuild.
+        public struct PartOffset
+        {
+            public Vector3 LocalPos;     // root-local frame
+            public Quaternion LocalRot;  // root-local frame
+        }
+
+        public Dictionary<Part, PartOffset> PartOffsets { get; }
+            = new Dictionary<Part, PartOffset>();
+
+        // Last-seen part list, used to detect topology changes that
+        // require a rebuild (decouple, dock, joint break, fairing
+        // eject, structural failure).
+        public HashSet<Part> LastParts { get; }
+            = new HashSet<Part>();
+
+        // Per-vessel mass aggregate (sum of part.mass +
+        // part.GetResourceMass over LastParts). Reconciler / scene
+        // driver compares against the live sum and emits a single
+        // MassUpdate record when it drifts past threshold.
+        public float LastMass;
 
         public ManagedVessel(Vessel vessel, uint groupId)
         {
             Vessel = vessel;
             GroupId = groupId;
         }
-
-        public IEnumerable<BodyHandle> BodyHandles => Bodies.Values;
-        public IEnumerable<uint> ConstraintIds => ConstraintEdges.Values;
-
-        public void AddBody(Part part, BodyHandle handle)
-        {
-            // The reverse (handle → JoltBody → Part) lookup lives on
-            // JoltBody itself; ManagedVessel just records its
-            // membership in this vessel's body set.
-            Bodies[part] = handle;
-        }
-
-        public void RemoveBody(Part part)
-        {
-            // We only relinquish vessel membership here. The JoltBody
-            // MonoBehaviour stays alive on the GameObject — another
-            // ManagedVessel may claim it (decouple → new vessel) or
-            // Unity will eventually destroy the component, at which
-            // point JoltBody.OnDestroy queues the BodyDestroy.
-            Bodies.Remove(part);
-        }
-
-        public void AddEdge(Part parent, Part child, uint constraintId)
-        {
-            ConstraintEdges[(parent, child)] = constraintId;
-        }
-
-        public bool RemoveEdge(Part parent, Part child, out uint constraintId)
-        {
-            var key = (parent, child);
-            if (ConstraintEdges.TryGetValue(key, out constraintId))
-            {
-                ConstraintEdges.Remove(key);
-                return true;
-            }
-            return false;
-        }
-
-        public bool TryGetHandle(Part part, out BodyHandle handle) =>
-            Bodies.TryGetValue(part, out handle);
     }
 }

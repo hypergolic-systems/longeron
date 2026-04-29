@@ -158,49 +158,24 @@ LongeronWorld::LongeronWorld(const ::LongeronConfig& cfg)
         static_cast<float>(cfg.gravity_y),
         static_cast<float>(cfg.gravity_z)));
 
-    // Stiff-stack tuning. KSP rockets are long FixedConstraint chains
-    // with high mass ratios (light decouplers between heavy fuel
-    // tanks, radial boosters with long lever arms from the parent's
-    // CoM). Three knobs above the Jolt defaults:
+    // Solver iterations stay at Jolt defaults. Single-body-per-vessel
+    // (Phase 2.x) means there are no intra-vessel constraints to
+    // converge over — vessel motion is integrated as one rigid body,
+    // and inter-vessel contacts are the only constraints PGS needs to
+    // resolve. Defaults handle that fine.
     //
-    //   mNumVelocitySteps: 10 → 24
-    //   mNumPositionSteps: 2 → 8
-    //     PGS-style solvers propagate constraint correction one link
-    //     per iteration; long chains and high mass ratios need more.
+    // History (kept for reference): we briefly ran the multi-body
+    // FixedConstraint chain at 24/8 → 64/32 → 128/64 → 256/128 to
+    // brute-force PGS convergence on KSP-scale mass ratios. None of
+    // those gave clean results; the right answer was to drop the
+    // multi-body model entirely. Phase 4 (Featherstone ABA) computes
+    // joint forces post-hoc for break detection without re-introducing
+    // any iterative coupling.
     //
-    //   mBaumgarte: 0.2 → 0.8
-    //     Default Baumgarte only fixes 20% of position error per
-    //     step. The remaining 80% leaks across ticks, producing
-    //     visible under-damped oscillation — joints "hang and bounce
-    //     as if on weak springs" even though FixedConstraint is
-    //     mathematically rigid. 0.8 fixes 80% per step (≈ critically
-    //     damped); 1.0 would be 100% but tends to overshoot under
-    //     stack imbalance.
-    //
-    // Phase 4 (ABA in reduced coords) makes all three knobs
-    // irrelevant; until then, this is the cheap stiffness fix.
-    {
-        JPH::PhysicsSettings settings = mPhysicsSystem.GetPhysicsSettings();
-        // KSP rockets are long FixedConstraint chains with high mass
-        // ratios. PGS propagates one link of correction per iteration;
-        // each iteration leaves a residual that warm-starting carries
-        // forward. Empirical observation:
-        //
-        //   24 / 8  iters → boosters oscillate ±15° (bad)
-        //   64 / 32 iters → boosters oscillate ±10°, never settles
-        //   128 / 64 iters → 6° spawn transient, settles by 1.6 s, <0.3° steady
-        //   256 / 128 iters → ? (this attempt)
-        //
-        // Without warm-start: 90° free fall regardless of iteration
-        // count. So warm-start carries λ from prior tick; iterations
-        // refine. Phase 4 (ABA in reduced coords) drops these knobs
-        // entirely — no chain to converge over, joint forces written
-        // directly each tick.
-        settings.mNumVelocitySteps = 256;
-        settings.mNumPositionSteps = 128;
-        settings.mBaumgarte = 0.8f;
-        mPhysicsSystem.SetPhysicsSettings(settings);
-    }
+    // Defaults from Jolt's PhysicsSettings.h:
+    //   mNumVelocitySteps = 10
+    //   mNumPositionSteps = 2
+    //   mBaumgarte = 0.2
 
     mContactListener = std::make_unique<ContactListenerImpl>(this);
     mPhysicsSystem.SetContactListener(mContactListener.get());
@@ -769,6 +744,23 @@ void LongeronWorld::HandleForceDelta(const uint8_t*& cur, const uint8_t* end) {
         static_cast<float>(tx), static_cast<float>(ty), static_cast<float>(tz)));
 }
 
+void LongeronWorld::HandleForceAtPosition(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t user_id = Read<uint32_t>(cur, end);
+    const JPH::Vec3 force  = JPH::Vec3(
+        static_cast<float>(Read<double>(cur, end)),
+        static_cast<float>(Read<double>(cur, end)),
+        static_cast<float>(Read<double>(cur, end)));
+    const JPH::RVec3 point = ReadDouble3(cur, end);
+
+    auto it = mBodyRegistry.find(user_id);
+    if (it == mBodyRegistry.end()) return;
+
+    // BodyInterface::AddForce(BodyID, Vec3 force, RVec3 point) computes
+    // the implicit torque (point - CoM) × force internally.
+    JPH::BodyInterface& bi = mPhysicsSystem.GetBodyInterface();
+    bi.AddForce(it->second, force, point);
+}
+
 // --------------------------------------------------------------------
 // Output emission
 
@@ -838,6 +830,7 @@ int32_t LongeronWorld::Step(
         case RecordType::SetGravity:        HandleSetGravity(cur, end); break;
         case RecordType::SetKinematicPose:  HandleSetKinematicPose(cur, end); break;
         case RecordType::ForceDelta:        HandleForceDelta(cur, end); break;
+        case RecordType::ForceAtPosition:   HandleForceAtPosition(cur, end); break;
         case RecordType::ConstraintCreate:  HandleConstraintCreate(cur, end); break;
         case RecordType::ConstraintCreateFixedAt: HandleConstraintCreateFixedAt(cur, end); break;
         case RecordType::ConstraintDestroy: HandleConstraintDestroy(cur, end); break;
