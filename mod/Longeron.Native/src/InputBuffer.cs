@@ -617,11 +617,10 @@ namespace Longeron.Native
             public float   ComLocalX, ComLocalY, ComLocalZ;
             public float   InertiaDiagX, InertiaDiagY, InertiaDiagZ;
             public float   AttachLocalX, AttachLocalY, AttachLocalZ;
-            // Phase 5: per-edge compliance (joint to parent). Isotropic
-            // 6-DOF spring-damper. Linear in kN/m, angular in kN·m/rad,
-            // damping in kN·s/m and kN·m·s/rad respectively. Root's
-            // values are unused (no edge to a non-existent parent).
-            public float   KLin, CLin;
+            // Phase 5.1: per-edge spherical-joint compliance (joint to
+            // parent). 3 angular DOF only — translation between anchors
+            // is rigidly pinned. K_ang in kN·m/rad, C_ang in kN·m·s/rad.
+            // Root's values are unused (no edge to a non-existent parent).
             public float   KAng, CAng;
         }
 
@@ -633,14 +632,14 @@ namespace Longeron.Native
         /// index, or 0xFFFF for the root).
         /// Layout: tag(1) + body_id(4) + part_count(2)
         ///         + part_count × (parent_idx(2) + mass(4) + 3 × float3(36)
-        ///                         + compliance(16))
-        ///         = 7 + N*58 bytes.
+        ///                         + compliance(8))
+        ///         = 7 + N*50 bytes.
         /// </summary>
         public void WriteVesselTreeUpdate(BodyHandle vesselBody, VesselTreeNode[] nodes)
         {
             int n = nodes != null ? nodes.Length : 0;
             const int kHeader = 1 /*tag*/ + 4 /*body_id*/ + 2 /*part_count*/;
-            const int kPerNode = 2 + 4 + 12 + 12 + 12 + 16;  // 58 bytes
+            const int kPerNode = 2 + 4 + 12 + 12 + 12 + 8;  // 50 bytes
             int kSize = kHeader + n * kPerNode;
             EnsureCapacity(kSize);
             byte* p = _ptr + _len;
@@ -661,8 +660,6 @@ namespace Longeron.Native
                 *(float*)p  = node.AttachLocalX;  p += 4;
                 *(float*)p  = node.AttachLocalY;  p += 4;
                 *(float*)p  = node.AttachLocalZ;  p += 4;
-                *(float*)p  = node.KLin;          p += 4;
-                *(float*)p  = node.CLin;          p += 4;
                 *(float*)p  = node.KAng;          p += 4;
                 *(float*)p  = node.CAng;          p += 4;
             }

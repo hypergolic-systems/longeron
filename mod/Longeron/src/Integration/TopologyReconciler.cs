@@ -324,23 +324,22 @@ namespace Longeron.Integration
                 node.AttachLocalY = attachLocal.y;
                 node.AttachLocalZ = attachLocal.z;
 
-                // Phase 5 ABA: per-edge spring-damper compliance.
-                // Mirrors PartJoint.SetupJoint's stiffness formula:
+                // Phase 5.1 ABA: per-edge spherical-joint compliance.
+                // Translation between anchors is rigidly pinned (no
+                // K_lin); only angular spring + damper. Mirrors
+                // PartJoint.SetupJoint's stiffness formula:
                 //
                 //   K_ang = rigidity (1500) × num3 × {Stack,Srf}AttachStiffNess
                 //   num3  = (size + 1) × {stack:2, srf:0.8}
                 //
                 // multiplied by kStiffnessScale to make rockets more
-                // rigid than stock (Phase 5.0 target: visible flex
-                // only on heavy bending loads, not on every joint).
+                // rigid than stock (visible flex only on heavy bending
+                // loads, not on every joint).
                 //
-                // K_lin defaults to 100× K_ang to keep linear flex
-                // imperceptible while angular flex remains visible.
-                //
-                // Damping = 0.7 × critical, where critical for the
-                // angular oscillator on this part is 2 × sqrt(K_ang × I).
-                // We approximate I with the average of the part's
-                // diagonal inertia. Linear uses the part's mass.
+                // Damping = critical, where critical for the angular
+                // oscillator on this part is 2 × sqrt(K_ang × I). We
+                // approximate I with the average of the part's
+                // diagonal inertia.
                 ComputeJointCompliance(p, i, ref node);
             }
 
@@ -361,40 +360,38 @@ namespace Longeron.Integration
         // the diagonal. Good enough for advisory magnitudes; Phase 4.x
         // can extend to a full symmetric tensor.)
         // Phase 5 ABA stiffness scale — multiplier on top of stock's
-        // PartJoint.SetupJoint formula. Higher = more rigid, less
-        // visible flex. Started at 30× but the resulting transients on
-        // pad-rest could push parts into the ground faster than
-        // CollisionEnhancer's anti-clip threshold, causing parts to
-        // explode. 5× is conservative for v1 — small visible flex on
-        // heavy bending, no transient blowup. Crank up gradually as
-        // stability allows.
-        const float kStiffnessScale = 5f;
-
-        // Linear-to-angular stiffness ratio. Stock uses positionSpring=1e20
-        // for linear (essentially incompressible) and finite stiffness
-        // for angular drives. With kStiffnessScale=5 and ratio=5, linear
-        // K is moderate enough that linear flex stays sub-cm under any
-        // realistic load while angular flex of stock-equivalent
-        // magnitude remains.
-        const float kLinAngRatio = 5f;
+        // PartJoint.SetupJoint formula. The pad-rest transient
+        // instability that prompted the original drop to 5× was
+        // ultimately caused by the NotifyShapeChanged CoM-mismatch
+        // bug (now fixed). With that fix in place, low stiffness
+        // also creates a thrust-feedback runaway: as the engine
+        // flexes angularly under thrust, the thrust direction tilts
+        // in body frame → lateral force grows → more flex → divergence.
+        // Stable when K_ang > F_thrust × engine_lever ≈ 100 kN·m/rad
+        // for typical engines; needs ~10× margin for transient damping.
+        // 30× stock = 1800 kN·m/rad on size-1 stack → 18× margin.
+        // Equilibrium under heavy load stays at ~1-3° (visible flex
+        // on radial decouplers etc., near-rigid stack joints).
+        const float kStiffnessScale = 30f;
 
         // Damping ratio (fraction of critical). 1.0 = critical (fastest
         // non-overshoot decay). Super-critical (>1) introduces a fast
         // eigenvalue at -(ζ + sqrt(ζ²-1))·ω that needs dt < 0.76/ω for
-        // semi-implicit Euler stability — small parts (low inertia,
-        // ω ~500 rad/s) can blow up at our 1 ms substep. Critical
-        // gives stable dt < 2/ω = 4 ms margin without overshoot.
+        // semi-implicit Euler stability. Critical gives stable dt < 2/ω
+        // margin without overshoot.
         const float kDampingRatio = 1.0f;
 
-        // Compute the per-edge spring-damper compliance for the joint
+        // Compute the per-edge spherical-joint compliance for the joint
         // connecting `p` (BFS index `idx`) to its parent. Writes the
-        // 4 values into `node`. For the root (idx == 0) writes zeros.
+        // 2 angular values into `node`. For the root (idx == 0) writes
+        // zeros. Phase 5.1: linear DOF was eliminated (anchors rigidly
+        // pinned), so K_lin / C_lin no longer exist on the wire — see
+        // splendid-dancing-flute.md.
         static void ComputeJointCompliance(Part p, int idx,
             ref InputBuffer.VesselTreeNode node)
         {
             if (idx == 0 || p.parent == null)
             {
-                node.KLin = 0f; node.CLin = 0f;
                 node.KAng = 0f; node.CAng = 0f;
                 return;
             }
@@ -417,27 +414,21 @@ namespace Longeron.Integration
 
             // Stock's stiffness in N·m/rad (units: positionSpring on
             // a ConfigurableJoint angular drive). Native side expects
-            // kN·m/rad for K_ang and kN/m for K_lin since our forces
-            // and masses are already in kN/tonnes.
+            // kN·m/rad for K_ang since our forces and masses are
+            // already in kN/tonnes.
             float stockRigidity = 1500f;
             float stiffStock_Nm = stockRigidity * num3 * FlightGlobals.StackAttachStiffNess;
             float kAng_Nm = stiffStock_Nm * kStiffnessScale;
             // Convert N·m/rad → kN·m/rad: divide by 1000.
             float kAng_kNm = kAng_Nm * 0.001f;
-            float kLin_kNm = kAng_kNm * kLinAngRatio;
 
-            // Critical damping coefficients. For a 1-DOF mass-spring
-            // oscillator: critical = 2 × sqrt(K × m_eff). Use the part's
-            // mass for linear and an inertia ballpark for angular.
-            float partMass = node.Mass; // tonnes (already populated above)
-            if (partMass <= 1e-6f) partMass = 1e-3f;
+            // Critical damping for the angular oscillator on this part:
+            // critical = 2 × sqrt(K × I), with I approximated as the
+            // mean of the part's diagonal inertia.
             float inertiaBallpark = (node.InertiaDiagX + node.InertiaDiagY + node.InertiaDiagZ) / 3f;
             if (inertiaBallpark <= 1e-9f) inertiaBallpark = 1e-3f;
-            float cLin_kNs = kDampingRatio * 2f * Mathf.Sqrt(kLin_kNm * partMass);
             float cAng_kNm = kDampingRatio * 2f * Mathf.Sqrt(kAng_kNm * inertiaBallpark);
 
-            node.KLin = kLin_kNm;
-            node.CLin = cLin_kNs;
             node.KAng = kAng_kNm;
             node.CAng = cAng_kNm;
         }

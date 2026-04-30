@@ -153,5 +153,13 @@ namespace Longeron.Native
             IntPtr p = longeron_version();
             return p == IntPtr.Zero ? "(null)" : Marshal.PtrToStringAnsi(p);
         }
+
+        /// <summary>
+        /// In-process sanity check on the C++ Featherstone spatial-vector
+        /// primitives. Returns 0 on success or the 1-indexed number of
+        /// the first failing check.
+        /// </summary>
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int longeron_spatial_selftest();
     }
 }

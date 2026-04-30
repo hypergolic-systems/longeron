@@ -76,6 +76,13 @@ LONGERON_EXPORT int32_t longeron_step(
 // X.Y.Z (jolt: ...)"). Caller does not own the pointer.
 LONGERON_EXPORT const char* longeron_version(void);
 
+// Runs in-process sanity checks on the Featherstone spatial-vector
+// primitives in spatial.h. Returns 0 on success, or the 1-indexed
+// number of the first failing check. Used by the M2 gate in
+// Longeron.Native.Probe — failure here signals a bug in the spatial
+// layer that all of ABA depends on.
+LONGERON_EXPORT int32_t longeron_spatial_selftest(void);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

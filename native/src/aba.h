@@ -1,24 +1,40 @@
-// Featherstone-style ABA forward dynamics for vessel internal flex.
+// Featherstone ABA forward dynamics for vessel internal flex.
 //
-// Architecture (Phase 5.0): each non-root part is a free 6-DOF body in
-// vessel-body frame, coupled to its parent by a 6-DOF compliant
-// spring-damper joint at the joint anchor (attach_local). Jolt owns
-// the vessel-CoM motion (rigid-body integration under summed external
-// wrench + contacts). ABA owns the flex residual — per-part state
-// (delta_pos, delta_rot, lin_vel, ang_vel) tracked in vessel-body axes,
-// integrated by semi-implicit (symplectic) Euler with substepping.
+// Architecture (Phase 5.1): fixed-base reduced-coordinate Featherstone
+// ABA over the vessel's part tree, with **spherical joints** (3 angular
+// DOF, anchors rigidly pinned). Jolt owns vessel-CoM motion (contacts,
+// gravity, summed external wrench → rigid-body integration). ABA owns
+// the per-edge joint state — quaternion q_i (child-relative-to-parent
+// rotation about anchor) and ω_i (joint-relative angular velocity in
+// parent frame), stored in PartFlex.delta_rot (cumulative, vessel-frame)
+// and PartFlex.ang_vel respectively.
 //
-// Why "ABA-style" but maximal coords: with 6-DOF compliant joints,
-// reduced-coordinate Featherstone ABA collapses to the same equations
-// as maximal-coords spring-coupled bodies. The reduced formulation's
-// advantage is for hard constraints (revolute, prismatic) — for pure
-// soft compliance, the maximal form is equivalent and simpler.
+// Per substep:
+//  1. Outward kinematics (root → leaf): propagate parent's spatial
+//     velocity through joint motion subspace S = [I_3; 0_3]; cache
+//     each part's vessel-frame delta_rot / delta_pos for downstream
+//     consumers (RouteContactForce, RNEA, ApplyFlexToBodies).
+//  2. Inward articulated-inertia pass (leaf → root): build I^A and
+//     bias p^A at each link, with external wrench rotated into the
+//     part's CURRENT frame (preserving feedback_physics_visuals_align —
+//     forces act through visible flexed geometry, never rest).
+//  3. Outward acceleration solve: 3×3 angular block solve per joint
+//     yields qddot_i; spatial accel propagates outward.
+//  4. Semi-implicit Euler integrate: ω += dt × qddot, then
+//     q ← integrate_quaternion(q, ω, dt).
+//
+// Why reduced coords: hard translation constraint between anchors
+// (the structural reality) is closed-form in the joint motion
+// subspace — no PGS, no Lagrange, no penalty spring. Linear flex
+// falls out from the joint chain through lever arms, never integrated.
 //
 // Stability: semi-implicit Euler is stable for harmonic oscillators
 // when dt < 2/ω_n. With our default 30× stock stiffness on size-1
 // stack joints (K_ang ≈ 1.8 MN·m/rad, I ≈ 0.5 t·m²) → ω_n ≈ 60 rad/s
 // → stable dt < 33 ms. KSP runs at 50 Hz (dt = 20 ms) — borderline.
-// We substep at 10× (500 Hz internal) for headroom.
+// We substep at 20× (1 ms substep) for ~30× margin. With linear DOF
+// gone (no K_lin frequency contributing), the worst-case ω is
+// strictly the angular mode.
 //
 // TODO (Phase 5.x): swap to implicit-Euler joint integration so we
 // can run at native 50 Hz without substep cost, and handle stiffer
@@ -66,11 +82,13 @@ void RunAbaForwardStep(
     uint32_t body_id,
     std::vector<AbaPartDiagRecord>* diag_out);
 
-// Number of internal substeps per Jolt physics tick. With Phase 5.0
-// stiffness (kStiffnessScale=5×, kLinAngRatio=5) the highest natural
-// freq is around ω_n ≈ 100 rad/s; semi-implicit Euler is stable when
-// dt × ω < 2, so dt < 20 ms is fine. We substep at 20× → 1 ms substep
-// → comfortable 5× margin.
+// Number of internal substeps per Jolt physics tick. With Phase 5.1
+// (spherical joints only — no linear stiffness contributing to ω_n)
+// the highest natural freq under default 30× stock stiffness is the
+// angular mode, ω_n ≈ 60 rad/s. Semi-implicit Euler is stable when
+// dt × ω < 2, so dt < 33 ms is fine on its own. We substep at 20×
+// → 1 ms substep → ample headroom for spikes (heavy parts on light
+// joints).
 inline constexpr int kAbaSubsteps = 20;
 
 // Number of post-Upsert ticks during which ABA emits per-part diag

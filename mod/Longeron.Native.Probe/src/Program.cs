@@ -34,6 +34,18 @@ namespace Longeron.Native.Probe
             Run("contact normal points roughly upward",        ContactNormal_PointsUpward);
             Run("FixedConstraint holds two dynamic bodies together", FixedConstraint_HoldsTwoBodies);
 
+            // -- ABA scenarios (M1+) ---------------------------------------
+            Console.WriteLine();
+            Console.WriteLine("-- ABA scenarios --");
+            Run("M2 spatial-vector primitives self-test",       AbaScenarios.Spatial_PrimitivesSelfTest);
+            Run("M1.1 single-part vessel emits no PartPose",    AbaScenarios.SinglePartVessel_NoFlexEmitted);
+            Run("M1.2 two-part vessel at rest stays unflexed",  AbaScenarios.TwoPartVessel_AtRest_NoFlex);
+            Run("M1.3 two-part vessel: force on child → flex",  AbaScenarios.TwoPartVessel_ForceOnChild_FlexEmerges);
+            Run("M3.1 pendulum at rest, no motion",             AbaScenarios.Pendulum_AtRest_NoMotion);
+            Run("M3.2 pendulum equilibrium = F·L/K_ang",        AbaScenarios.Pendulum_EquilibriumMatchesAnalytic);
+            Run("M3.3 undamped period = 2π√(I/K)",              AbaScenarios.Pendulum_UndampedPeriodMatchesAnalytic);
+            Run("M3.4 critical-damped decay to rest",           AbaScenarios.Pendulum_CriticalDampingDecaysToRest);
+
             Console.WriteLine();
             if (sFailures == 0)
             {

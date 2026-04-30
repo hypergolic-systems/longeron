@@ -34,6 +34,14 @@ namespace Longeron.Native
         public static string NativeVersion => NativeBridge.GetVersion();
 
         /// <summary>
+        /// Run the C++ Featherstone spatial-vector self-test (defined
+        /// in <c>native/src/spatial.h</c>). Returns 0 on success, or
+        /// the 1-indexed number of the first failing check. Intended
+        /// for use by the M2 gate in <c>Longeron.Native.Probe</c>.
+        /// </summary>
+        public static int SpatialSelfTest() => NativeBridge.longeron_spatial_selftest();
+
+        /// <summary>
         /// Runs the per-FixedUpdate step: feeds the accumulated input
         /// records into the native bridge, advances the Jolt world by
         /// <paramref name="dt"/>, and surfaces output records via

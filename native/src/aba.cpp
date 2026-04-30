@@ -1,4 +1,44 @@
+// Phase 5.1.2: canonical reduced-coord Featherstone ABA forward pass.
+// Spherical joint at every non-root edge. Each link integrates its
+// joint state (q_joint, ω_joint) via the three-pass recursion:
+//
+//   Pass 1 (root → leaf): outward kinematics. Spatial velocity v_i and
+//     Coriolis bias c_i in each link's body frame, transformed through
+//     X_up = (q_joint, t_up_const).
+//
+//   Pass 2 (leaf → root): inward articulated-inertia. I^A and p^A per
+//     link, each with the rank-3 spherical reduction projecting out
+//     the joint motion subspace before transforming + adding to parent.
+//
+//   Pass 3 (root → leaf): outward acceleration solve. qddot = D⁻¹ ·
+//     (u − S^T·I^A·a_parent_propagated). Spatial acceleration a_i =
+//     a_parent_propagated + S·qddot + c_i.
+//
+// Then integrate (semi-implicit Euler): ω_joint += dt·qddot,
+// q_joint = integrate_quat_right(q_joint, ω_joint, dt).
+//
+// State storage maps to PartFlex as:
+//   delta_rot[i] — vessel-frame cumulative rotation R_v[i] (output;
+//     re-decomposed at entry to recover q_joint[i]).
+//   delta_pos[i] — vessel-frame CoM deflection (output, derived from
+//     joint chain).
+//   ang_vel[i]   — ω_joint[i] in body i's frame (primary integrated
+//     state across ticks).
+//   lin_vel[i]   — unused (no linear DOF).
+//
+// Design note: ω_joint is stored in body i's frame so the joint
+// motion subspace S = [I_3; 0_3] applies directly (S × ω_joint =
+// SpatialMotion(ω_joint, 0) in body frame). Quaternion integration
+// is right-multiply: q ← q · (1, ω·dt/2).
+//
+// External wrench (F_flex, T_flex) is computed once per call in
+// vessel frame and rotated into each part's body frame at bias-force
+// time using the per-substep-current R_v[i]. This realizes the
+// `feedback_physics_visuals_align` invariant: forces act through
+// each part's CURRENT flexed orientation.
+
 #include "aba.h"
+#include "spatial.h"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Math/Vec3.h>
@@ -6,38 +46,32 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace longeron {
 
 namespace {
 
-// Convert a small-angle rotation quaternion to its axis-angle vector
-// (axis × angle in radians). For unit quaternion q = (xyz, w),
-// axis-angle ≈ 2 × xyz / w for small angles. We clamp via the sign of
-// w to handle the double-cover (q and -q represent the same rotation).
+// Convert a quaternion to its axis-angle 3-vec (axis × angle in rad).
+// Handles double-cover: q and -q represent the same rotation.
 JPH::Vec3 QuatToAxisAngle(JPH::Quat q) {
-    // Ensure scalar part is non-negative; otherwise -q is the smaller
-    // rotation in the cover.
     if (q.GetW() < 0.0f) q = JPH::Quat(-q.GetX(), -q.GetY(), -q.GetZ(), -q.GetW());
     JPH::Vec3 v(q.GetX(), q.GetY(), q.GetZ());
     float w = q.GetW();
-    // For w near 1, sin(θ/2) ≈ θ/2 → axis-angle ≈ 2 × v.
-    // For larger angles, axis-angle = 2 × atan2(|v|, w) × v / |v|.
     float v_len = v.Length();
     if (v_len < 1.0e-6f) return JPH::Vec3::sZero();
     float angle = 2.0f * std::atan2(v_len, w);
     return v * (angle / v_len);
 }
 
-// Integrate a quaternion forward by the given angular velocity over dt.
-// First-order: q_{n+1} = normalize(q_n + dt/2 · ω · q_n)
-// where ω is treated as a pure quaternion (0, ωxyz).
-JPH::Quat IntegrateRotation(JPH::Quat q, JPH::Vec3 omega, float dt) {
-    JPH::Quat dq(0.5f * omega.GetX() * dt,
-                 0.5f * omega.GetY() * dt,
-                 0.5f * omega.GetZ() * dt,
+// Right-multiply quaternion integration: q_new = q · (1, ω_body·dt/2),
+// renormalized. ω_body is angular velocity expressed in q's body frame.
+JPH::Quat IntegrateRotationRight(JPH::Quat q, JPH::Vec3 omega_body, float dt) {
+    JPH::Quat dq(0.5f * omega_body.GetX() * dt,
+                 0.5f * omega_body.GetY() * dt,
+                 0.5f * omega_body.GetZ() * dt,
                  0.0f);
-    JPH::Quat q_dot = dq * q;
+    JPH::Quat q_dot = q * dq;
     JPH::Quat q_new(q.GetX() + q_dot.GetX(),
                     q.GetY() + q_dot.GetY(),
                     q.GetZ() + q_dot.GetZ(),
@@ -45,30 +79,23 @@ JPH::Quat IntegrateRotation(JPH::Quat q, JPH::Vec3 omega, float dt) {
     return q_new.Normalized();
 }
 
-// Multiply per-axis inertia (diagonal in vessel-frame approximation)
-// by an angular vector, giving the angular momentum / inertia-velocity.
+// Component-wise inertia × vec — used only for the inertial-residual
+// computation. Independent of frame: works on the diag values.
 JPH::Vec3 InertiaTimes(JPH::Vec3 I_diag, JPH::Vec3 v) {
     return JPH::Vec3(I_diag.GetX() * v.GetX(),
                      I_diag.GetY() * v.GetY(),
                      I_diag.GetZ() * v.GetZ());
 }
 
-// Element-wise inertia inverse times vector (for the integration step).
-// Guards against zero inertia by treating inverse as zero (no rotation
-// from torque if inertia is degenerate — rare but possible for tiny
-// massless parts that escape filtering on the C# side).
-JPH::Vec3 InertiaInverseTimes(JPH::Vec3 I_diag, JPH::Vec3 v) {
-    auto inv = [](float i) { return (i > 1.0e-9f) ? (1.0f / i) : 0.0f; };
-    return JPH::Vec3(inv(I_diag.GetX()) * v.GetX(),
-                     inv(I_diag.GetY()) * v.GetY(),
-                     inv(I_diag.GetZ()) * v.GetZ());
-}
+// Rotate a 3-vec by a quaternion's inverse (q⁻¹ · v) — used to take
+// a vessel-frame vector into a part's body frame.
+JPH::Vec3 RotateByInv(JPH::Quat q, JPH::Vec3 v) { return q.Conjugated() * v; }
 
 } // namespace
 
 void RunAbaForwardStep(
     VesselTree& tree,
-    JPH::Vec3 v_body,
+    JPH::Vec3 v_body_unused,
     JPH::Vec3 omega,
     JPH::Vec3 a_body,
     JPH::Vec3 alpha,
@@ -76,43 +103,36 @@ void RunAbaForwardStep(
     uint32_t body_id,
     std::vector<AbaPartDiagRecord>* diag_out)
 {
-    (void)v_body; // not used for the flex residual — only a_body matters
+    (void)v_body_unused;
     const size_t n = tree.nodes.size();
-    if (n < 2) return; // single-part vessel: no flex possible
+    if (n < 2) return;
 
-    // Substep dt — semi-implicit Euler is stable when dt < 2/ω_n. With
-    // our default ~30× stock stiffness, ω_n is typically ≤ 100 rad/s
-    // → dt < 20 ms ≈ one full Jolt tick. Substep 10× for headroom.
+
     const float dt = fixed_dt / static_cast<float>(kAbaSubsteps);
 
-    // Per-part inertial residual force (vessel-body axes). This is the
-    // share of each part's accumulated external force that's used by
-    // Jolt's rigid-body integration of the vessel CoM motion. ABA only
-    // sees what's left over.
+    // ---- Per-call setup ------------------------------------------------
     //
-    //   F_inertial_i = m_i · (a_body + α × r_i + ω × (ω × r_i))
-    //   T_inertial_i = I_i · α + ω × (I_i · ω)
-    //   F_flex_i = F_ext_i - F_inertial_i
-    //   T_flex_i = T_ext_i - T_inertial_i
-    //
-    // Held constant across substeps (KSP forces only update at 50 Hz).
-    std::vector<JPH::Vec3> F_flex(n);
-    std::vector<JPH::Vec3> T_flex(n);
+    // Inertial-residual force / torque per part (vessel frame), held
+    // constant across substeps (KSP only updates external forces at
+    // 50 Hz). F_inertial accounts for the share of part motion that's
+    // dragged along by Jolt's vessel-CoM integration; the residual
+    // F_flex / T_flex is what actually drives flex.
+
+    static thread_local std::vector<JPH::Vec3> F_flex, T_flex;
+    F_flex.assign(n, JPH::Vec3::sZero());
+    T_flex.assign(n, JPH::Vec3::sZero());
+
     for (size_t i = 0; i < n; ++i) {
         const PartNode& p = tree.nodes[i];
-        // Use the deflected r vector so the inertial residual matches
-        // what Jolt actually integrated for this part this tick.
         const JPH::Vec3 r = p.com_local + tree.flex[i].delta_pos;
-
         const JPH::Vec3 a_part = a_body + alpha.Cross(r) + omega.Cross(omega.Cross(r));
         const JPH::Vec3 F_inertial = p.mass * a_part;
         const JPH::Vec3 T_inertial = InertiaTimes(p.inertia_diag, alpha)
                                      + omega.Cross(InertiaTimes(p.inertia_diag, omega));
-
         F_flex[i] = tree.ext_force[i]  - F_inertial;
         T_flex[i] = tree.ext_torque[i] - T_inertial;
 
-        // Phase 5 ABA tick diag — first kAbaDiagWindow ticks per body.
+        // Diag emit (first kAbaDiagWindow ticks per body, every part).
         if (diag_out != nullptr && tree.diag_tick < kAbaDiagWindow) {
             AbaPartDiagRecord rec;
             rec.body_id    = body_id;
@@ -122,7 +142,6 @@ void RunAbaForwardStep(
             rec.f_inertial = F_inertial;
             rec.f_flex     = F_flex[i];
             rec.delta_pos  = tree.flex[i].delta_pos;
-            // Axis-angle magnitude of delta_rot (radians).
             JPH::Quat q = tree.flex[i].delta_rot;
             if (q.GetW() < 0.0f) q = JPH::Quat(-q.GetX(), -q.GetY(), -q.GetZ(), -q.GetW());
             float vmag = std::sqrt(q.GetX()*q.GetX() + q.GetY()*q.GetY() + q.GetZ()*q.GetZ());
@@ -133,144 +152,268 @@ void RunAbaForwardStep(
         }
     }
 
-    // Substep loop — semi-implicit (symplectic) Euler:
-    //   compute all forces + torques (joints + external residual)
-    //   v_lin += dt · F / m
-    //   ω     += dt · I⁻¹ · (T - ω × Iω)        // Newton-Euler torque
-    //   x     += dt · v_lin (using the JUST-updated v_lin)
-    //   q     += dt · 0.5 · ω · q (using the JUST-updated ω)
+    // ---- Reconstruct joint state from PartFlex --------------------------
     //
-    // For each part we accumulate joint contributions from BOTH sides
-    // of the joint (i.e., child receives spring force, parent receives
-    // -spring force). To avoid double-iterating, walk by edge once and
-    // apply ±F to (child, parent).
-    std::vector<JPH::Vec3> total_F(n);
-    std::vector<JPH::Vec3> total_T(n);
+    // delta_rot[i] from the previous tick is vessel-frame cumulative
+    // rotation R_v[i]. Decompose into per-edge q_joint[i] = R_v[parent]⁻¹
+    // · R_v[i]. ω_joint[i] is stored directly in PartFlex.ang_vel as
+    // joint angular velocity in body i's frame (its primary persisted
+    // form).
 
-    for (int sub = 0; sub < kAbaSubsteps; ++sub) {
-        // Reset per-part accumulators with the constant flex residual.
-        for (size_t i = 0; i < n; ++i) {
-            total_F[i] = F_flex[i];
-            total_T[i] = T_flex[i];
-        }
+    static thread_local std::vector<JPH::Quat> q_joint;
+    static thread_local std::vector<JPH::Vec3> omega_joint;
+    q_joint.assign(n, JPH::Quat::sIdentity());
+    omega_joint.assign(n, JPH::Vec3::sZero());
 
-        // Walk every non-root edge — accumulate joint spring/damper.
-        for (size_t i = 1; i < n; ++i) {
-            const uint16_t parent = tree.nodes[i].parent_idx;
-            if (parent >= n) continue; // safety: malformed tree
-
-            const PartNode& child_node  = tree.nodes[i];
-            const PartNode& parent_node = tree.nodes[parent];
-            const PartFlex& child_flex  = tree.flex[i];
-            const PartFlex& parent_flex = tree.flex[parent];
-            const EdgeCompliance& c     = tree.edge_compliance[i];
-
-            // Joint anchor on child side, in vessel frame.
-            // Rest position of anchor = attach_local (same point on
-            // both child and parent at rest by construction). Child's
-            // current pose: position = com_local + delta_pos,
-            // orientation = delta_rot. The anchor sits at
-            //   (attach_local - com_local) in child's local frame
-            // → world = child_position + child_rotation × that offset.
-            const JPH::Vec3 child_anchor_offset =
-                child_flex.delta_rot * (child_node.attach_local - child_node.com_local);
-            const JPH::Vec3 child_anchor =
-                child_node.com_local + child_flex.delta_pos + child_anchor_offset;
-
-            const JPH::Vec3 parent_anchor_offset =
-                parent_flex.delta_rot * (child_node.attach_local - parent_node.com_local);
-            const JPH::Vec3 parent_anchor =
-                parent_node.com_local + parent_flex.delta_pos + parent_anchor_offset;
-
-            // Linear displacement: where child's anchor IS minus where
-            // parent says it SHOULD be. Spring pulls child back to the
-            // parent-relative anchor position.
-            const JPH::Vec3 disp = child_anchor - parent_anchor;
-
-            // Linear velocity at the anchor (vessel frame):
-            //   v_anchor_child  = v_child_com + ω_child × child_anchor_offset
-            //   v_anchor_parent = v_parent_com + ω_parent × parent_anchor_offset
-            const JPH::Vec3 v_anchor_child =
-                child_flex.lin_vel + child_flex.ang_vel.Cross(child_anchor_offset);
-            const JPH::Vec3 v_anchor_parent =
-                parent_flex.lin_vel + parent_flex.ang_vel.Cross(parent_anchor_offset);
-            const JPH::Vec3 v_rel = v_anchor_child - v_anchor_parent;
-
-            // Linear spring + damper force on the child, applied at
-            // child_anchor. Equal+opposite on the parent at parent_anchor.
-            const JPH::Vec3 F_spring = -c.k_lin * disp - c.c_lin * v_rel;
-
-            // Angular displacement: relative orientation of child WRT
-            // parent. At rest both are identity → relative is identity.
-            // Under flex: relative = parent_rot⁻¹ × child_rot.
-            const JPH::Quat rel_rot = parent_flex.delta_rot.Conjugated() * child_flex.delta_rot;
-            const JPH::Vec3 rot_err = QuatToAxisAngle(rel_rot);
-            const JPH::Vec3 omega_rel = child_flex.ang_vel - parent_flex.ang_vel;
-            // Note: we're approximating that K_ang is in vessel frame
-            // and the relative rotation is "small enough" that the
-            // axis-angle vector is the right thing to pull on. For
-            // 5-15° flex this is fine; for larger we'd need the
-            // exponential map proper.
-            const JPH::Vec3 T_spring = -c.k_ang * rot_err - c.c_ang * omega_rel;
-
-            // Apply to child:
-            //   F_child = F_spring (linear, at child_anchor)
-            //   T_child = T_spring (angular)
-            //          + child_anchor_offset × F_spring   (lever arm of
-            //                                               linear force
-            //                                               about CoM)
-            total_F[i] = total_F[i] + F_spring;
-            total_T[i] = total_T[i] + T_spring + child_anchor_offset.Cross(F_spring);
-
-            // And equal+opposite to parent:
-            total_F[parent] = total_F[parent] - F_spring;
-            total_T[parent] = total_T[parent] - T_spring - parent_anchor_offset.Cross(F_spring);
-        }
-
-        // Integrate per-part state. Root (i=0) stays at zero by
-        // convention — it IS the vessel body's anchor, owned by Jolt.
-        for (size_t i = 1; i < n; ++i) {
-            const PartNode& p = tree.nodes[i];
-            PartFlex& f = tree.flex[i];
-
-            if (p.mass <= 1.0e-9f) continue; // massless part: skip integration
-
-            // Linear: v_lin += dt · F / m, then x += dt · v_lin
-            const JPH::Vec3 a_lin = total_F[i] * (1.0f / p.mass);
-            f.lin_vel = f.lin_vel + a_lin * dt;
-            f.delta_pos = f.delta_pos + f.lin_vel * dt;
-
-            // Angular: τ_eff = T - ω × (I·ω); α = I⁻¹ · τ_eff
-            const JPH::Vec3 I_omega = InertiaTimes(p.inertia_diag, f.ang_vel);
-            const JPH::Vec3 tau_eff = total_T[i] - f.ang_vel.Cross(I_omega);
-            const JPH::Vec3 alpha_part = InertiaInverseTimes(p.inertia_diag, tau_eff);
-            f.ang_vel = f.ang_vel + alpha_part * dt;
-            f.delta_rot = IntegrateRotation(f.delta_rot, f.ang_vel, dt);
-        }
+    for (size_t i = 1; i < n; ++i) {
+        const uint16_t p = tree.nodes[i].parent_idx;
+        if (p >= n) continue;
+        // q_joint[i] = R_v[p]⁻¹ × R_v[i]
+        q_joint[i] = tree.flex[p].delta_rot.Conjugated() * tree.flex[i].delta_rot;
+        omega_joint[i] = tree.flex[i].ang_vel;
     }
 
-    // Phase 5.0 safety clamp — if flex blew up beyond reasonable bounds
-    // (joint anchor moved > 1 m, or angular velocity > 50 rad/s), log
-    // once per vessel and reset that part's flex to rest. This catches
-    // numerical instability before it propagates to KSP's orbit reset.
-    // TODO (Phase 5.x): remove once implicit-Euler integration is in
-    // place and we trust stability fully.
-    constexpr float kMaxLinearFlexM   = 1.0f;
-    constexpr float kMaxAngVelRad     = 50.0f;
-    constexpr float kMaxLinVelMs      = 100.0f;
+    // Constant per-edge body-frame translation: t_up = attach_local[i]
+    // − attach_local[parent], the offset of body i's frame origin (its
+    // joint anchor) in parent's body frame.
+    static thread_local std::vector<JPH::Vec3> t_up;
+    t_up.assign(n, JPH::Vec3::sZero());
+    for (size_t i = 1; i < n; ++i) {
+        const uint16_t p = tree.nodes[i].parent_idx;
+        if (p >= n) continue;
+        t_up[i] = tree.nodes[i].attach_local - tree.nodes[p].attach_local;
+    }
+
+    // Per-call constant: each link's spatial inertia in its own body
+    // frame. com_in_body = com_local[i] − attach_local[i]; I_c is
+    // diagonal (principal-axis approximation).
+    static thread_local std::vector<SpatialInertia> M_link;
+    M_link.assign(n, SpatialInertia::Zero());
+    for (size_t i = 0; i < n; ++i) {
+        JPH::Vec3 com_in_body = tree.nodes[i].com_local - tree.nodes[i].attach_local;
+        M_link[i] = SpatialInertia::FromDiagonal(
+            tree.nodes[i].mass, com_in_body, tree.nodes[i].inertia_diag);
+    }
+
+    // Per-substep scratch.
+    static thread_local std::vector<JPH::Quat>     R_v;
+    static thread_local std::vector<JPH::Vec3>     pos_v;        // body i's frame origin in vessel frame
+    static thread_local std::vector<SpatialMotion> v_body;
+    static thread_local std::vector<SpatialMotion> c_body;
+    static thread_local std::vector<SpatialMatrix6> IA;
+    static thread_local std::vector<SpatialForce>   pA;
+    static thread_local std::vector<JPH::Vec3>      tau_body;    // joint spring/damper torque in body frame
+    static thread_local std::vector<SpatialMotion>  a_body_sp;   // spatial acceleration
+
+    R_v.assign(n, JPH::Quat::sIdentity());
+    pos_v.assign(n, JPH::Vec3::sZero());
+    v_body.assign(n, SpatialMotion::Zero());
+    c_body.assign(n, SpatialMotion::Zero());
+    IA.assign(n, SpatialMatrix6::Zero());
+    pA.assign(n, SpatialForce::Zero());
+    tau_body.assign(n, JPH::Vec3::sZero());
+    a_body_sp.assign(n, SpatialMotion::Zero());
+
+    // ---- Substep loop ---------------------------------------------------
+
+    for (int sub = 0; sub < kAbaSubsteps; ++sub) {
+
+        // Pass 1: outward kinematics (root → leaf). Parents are always
+        // before children in the topology order (parent_idx < i), so a
+        // forward sweep is correct.
+        R_v[0]   = JPH::Quat::sIdentity();
+        pos_v[0] = tree.nodes[0].attach_local;       // = (0,0,0) by convention
+        v_body[0] = SpatialMotion::Zero();           // fixed-base flex frame
+        c_body[0] = SpatialMotion::Zero();
+
+        for (size_t i = 1; i < n; ++i) {
+            const uint16_t p = tree.nodes[i].parent_idx;
+            if (p >= n) continue;
+
+            // X_up: parent body frame → body i's frame.
+            SpatialTransform X_up{q_joint[i], t_up[i]};
+
+            // v_body[i] = X_up · v_body[p] + S × ω_joint[i]
+            // For spherical, S × ω_joint = SpatialMotion(ω_joint_body, 0).
+            SpatialMotion v_par_in_body = X_up.TransformMotion(v_body[p]);
+            SpatialMotion v_joint{omega_joint[i], JPH::Vec3::sZero()};
+            v_body[i] = v_par_in_body + v_joint;
+
+            // c_i = v_body[i] ×̂ (S × ω_joint_body)
+            c_body[i] = CrossMotion(v_body[i], v_joint);
+
+            // Cumulative vessel-frame rotation + position.
+            R_v[i]   = R_v[p] * q_joint[i];
+            pos_v[i] = pos_v[p] + R_v[p] * t_up[i];
+        }
+
+        // Pass 1b: build articulated-inertia + bias force at each link
+        // in body frame. Spring + damper joint torque computed here so
+        // it's available in pass 2 and pass 3 reads.
+        for (size_t i = 0; i < n; ++i) {
+            // Initialize from rigid-body inertia.
+            IA[i] = SpatialMatrix6::FromInertia(M_link[i]);
+
+            // Bias: v ×̂* (M·v) − fext_body
+            //
+            // External wrench rotation:
+            //   F_body         = R_v[i]⁻¹ · F_flex[i]   (vessel-frame F at part CoM)
+            //   T_at_com_body  = R_v[i]⁻¹ · T_flex[i]   (vessel-frame T about part CoM)
+            //   n_at_origin_body = T_at_com_body + com_in_body × F_body
+            //                       (translate moment from CoM to body-frame origin)
+            JPH::Vec3 com_in_body = tree.nodes[i].com_local - tree.nodes[i].attach_local;
+            JPH::Vec3 F_body = RotateByInv(R_v[i], F_flex[i]);
+            JPH::Vec3 T_at_com_body = RotateByInv(R_v[i], T_flex[i]);
+            JPH::Vec3 n_at_origin_body = T_at_com_body + com_in_body.Cross(F_body);
+            SpatialForce fext_body{n_at_origin_body, F_body};
+
+            SpatialForce Iv = M_link[i].Mul(v_body[i]);
+            SpatialForce gyro = CrossForceDual(v_body[i], Iv);
+            pA[i] = gyro - fext_body;
+
+            // Joint spring + damper torque (only for non-root parts).
+            if (i > 0) {
+                // axisAngle(q_joint) and ω_joint are both in body i's
+                // frame (the axis of q_joint is invariant under q;
+                // ω_joint stored in body frame by construction).
+                JPH::Vec3 axis_angle = QuatToAxisAngle(q_joint[i]);
+                const EdgeCompliance& c = tree.edge_compliance[i];
+                tau_body[i] = -c.k_ang * axis_angle - c.c_ang * omega_joint[i];
+            } else {
+                tau_body[i] = JPH::Vec3::sZero();
+            }
+        }
+
+        // Pass 2: inward articulated-inertia (leaf → root).
+        // For each non-root link i with parent p:
+        //   D     = IA.a (3×3 angular block)         — S^T · IA · S
+        //   u     = -pA.angular + tau_body            — generalized force at joint
+        //   IA_a  = IA - U · D⁻¹ · U^T (rank-3)       — joint-reduced articulated inertia
+        //   pA_a  = pA + IA_a · c + U · D⁻¹ · u       — joint-reduced bias
+        //   accumulate IA_a, pA_a into parent (transformed to parent's frame).
+        //
+        // Iterate from highest index down; parent_idx < i guarantees
+        // parent is processed after this child.
+        static thread_local std::vector<JPH::Vec3> u_joint;
+        static thread_local std::vector<JPH::Vec3> Dinv_u_joint;
+        static thread_local std::vector<Mat33>     D_inv_joint;
+        u_joint.assign(n, JPH::Vec3::sZero());
+        Dinv_u_joint.assign(n, JPH::Vec3::sZero());
+        D_inv_joint.assign(n, Mat33::Identity());
+
+        for (size_t ii = n; ii-- > 1; ) {
+            size_t i = ii;
+            const uint16_t p = tree.nodes[i].parent_idx;
+            if (p >= n) continue;
+
+            Mat33 D = IA[i].a;
+            Mat33 D_inv;
+            if (!Inverse(D, &D_inv)) {
+                // Degenerate angular-inertia block — skip the joint
+                // reduction; transmit IA / pA up the chain unchanged.
+                IA[p] = IA[p] + IA[i].InverseTransform(SpatialTransform{q_joint[i], t_up[i]});
+                pA[p] = pA[p] + SpatialTransform{q_joint[i], t_up[i]}.InverseTransformForce(pA[i]);
+                continue;
+            }
+            D_inv_joint[i] = D_inv;
+
+            // u = -S^T · pA + tau_body = -pA.angular + tau_body
+            JPH::Vec3 u = -pA[i].angular + tau_body[i];
+            u_joint[i] = u;
+            JPH::Vec3 Dinv_u = D_inv * u;
+            Dinv_u_joint[i] = Dinv_u;
+
+            // Rank-3 reduction: IA_a = IA - U · D⁻¹ · U^T.
+            SpatialMatrix6 IA_a = SubRankSpherical(IA[i]);
+
+            // pA_a = pA + IA_a · c + U · D⁻¹ · u, where U·D⁻¹·u is a
+            // SpatialForce with components (IA.a · D⁻¹·u, IA.c · D⁻¹·u).
+            SpatialForce U_Dinv_u{IA[i].a * Dinv_u, IA[i].c * Dinv_u};
+            SpatialForce pA_a = pA[i] + IA_a.Mul(c_body[i]) + U_Dinv_u;
+
+            // Transform IA_a, pA_a from body i's frame to parent body
+            // frame, accumulate.
+            SpatialTransform X_up{q_joint[i], t_up[i]};
+            IA[p] = IA[p] + IA_a.InverseTransform(X_up);
+            pA[p] = pA[p] + X_up.InverseTransformForce(pA_a);
+        }
+
+        // Pass 3: outward acceleration solve (root → leaf).
+        // Root is fixed-base in flex frame: a_body_sp[0] = 0.
+        a_body_sp[0] = SpatialMotion::Zero();
+
+        for (size_t i = 1; i < n; ++i) {
+            const uint16_t p = tree.nodes[i].parent_idx;
+            if (p >= n) continue;
+
+            // aProp = X_up · a_parent + c_i  (in body i's frame).
+            SpatialTransform X_up{q_joint[i], t_up[i]};
+            SpatialMotion aProp = X_up.TransformMotion(a_body_sp[p]) + c_body[i];
+
+            // qddot = D⁻¹ · (u - S^T · IA · aProp)
+            //       = D⁻¹ · (u - (IA · aProp).angular)
+            SpatialForce IA_aProp = IA[i].Mul(aProp);
+            JPH::Vec3 rhs = u_joint[i] - IA_aProp.angular;
+            JPH::Vec3 qddot_i = D_inv_joint[i] * rhs;
+
+            // a_body[i] = aProp + S × qddot_i (= aProp with qddot added to angular).
+            a_body_sp[i] = aProp + SpatialMotion{qddot_i, JPH::Vec3::sZero()};
+
+            // Integrate joint state — semi-implicit Euler.
+            //   ω_joint += dt × qddot
+            //   q_joint  ← q_joint × (1, ω_joint·dt/2) (right-multiply)
+            omega_joint[i] = omega_joint[i] + qddot_i * dt;
+            q_joint[i] = IntegrateRotationRight(q_joint[i], omega_joint[i], dt);
+        }
+    } // substep loop
+
+    // ---- Compose vessel-frame outputs (delta_rot, delta_pos) ----------
+    // Walk root → leaf one final time using the post-substep joint
+    // state. Write results directly into PartFlex for downstream
+    // consumers (RouteContactForce, RNEA, ApplyFlexToBodies).
+
+    R_v[0]   = JPH::Quat::sIdentity();
+    pos_v[0] = tree.nodes[0].attach_local;     // (0,0,0) by convention
+
+    tree.flex[0].delta_pos = JPH::Vec3::sZero();
+    tree.flex[0].delta_rot = JPH::Quat::sIdentity();
+    tree.flex[0].lin_vel   = JPH::Vec3::sZero();
+    tree.flex[0].ang_vel   = JPH::Vec3::sZero();
+
+    for (size_t i = 1; i < n; ++i) {
+        const uint16_t p = tree.nodes[i].parent_idx;
+        if (p >= n) continue;
+        R_v[i]   = R_v[p] * q_joint[i];
+        pos_v[i] = pos_v[p] + R_v[p] * t_up[i];
+
+        // Vessel-frame CoM under current configuration:
+        //   com_v[i] = pos_v[i] + R_v[i] · (com_local[i] - attach_local[i])
+        JPH::Vec3 com_in_body = tree.nodes[i].com_local - tree.nodes[i].attach_local;
+        JPH::Vec3 com_v = pos_v[i] + R_v[i] * com_in_body;
+
+        tree.flex[i].delta_pos = com_v - tree.nodes[i].com_local;
+        tree.flex[i].delta_rot = R_v[i];
+        tree.flex[i].ang_vel   = omega_joint[i];          // body-frame ω_joint (state for next tick)
+        tree.flex[i].lin_vel   = JPH::Vec3::sZero();      // unused under spherical
+    }
+
+    // ---- Safety clamp (unchanged in spirit) ---------------------------
+    // Catch numerical blowups before they propagate to KSP's orbit
+    // reset. Per-part state reset to rest if any field exceeds bounds.
+    constexpr float kMaxLinearFlexM = 1.0f;
+    constexpr float kMaxAngVelRad   = 50.0f;
     static int s_clamp_log_count = 0;
     for (size_t i = 1; i < n; ++i) {
         PartFlex& f = tree.flex[i];
         const float pos_mag = f.delta_pos.Length();
-        const float lv_mag  = f.lin_vel.Length();
         const float av_mag  = f.ang_vel.Length();
-        if (pos_mag > kMaxLinearFlexM || lv_mag > kMaxLinVelMs || av_mag > kMaxAngVelRad
-            || !std::isfinite(pos_mag) || !std::isfinite(lv_mag) || !std::isfinite(av_mag))
+        if (pos_mag > kMaxLinearFlexM || av_mag > kMaxAngVelRad
+            || !std::isfinite(pos_mag) || !std::isfinite(av_mag))
         {
             if (s_clamp_log_count < 8) {
                 s_clamp_log_count++;
-                JPH::Trace("[aba/clamp] part_idx=%zu reset: |dp|=%.2f |lv|=%.2f |av|=%.2f",
-                           i, pos_mag, lv_mag, av_mag);
+                JPH::Trace("[aba/clamp] part_idx=%zu reset: |dp|=%.2f |av|=%.2f",
+                           i, pos_mag, av_mag);
             }
             f.delta_pos = JPH::Vec3::sZero();
             f.delta_rot = JPH::Quat::sIdentity();

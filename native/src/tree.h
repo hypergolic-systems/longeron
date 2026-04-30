@@ -1,29 +1,41 @@
 // Per-vessel spanning tree + Featherstone RNEA pass + ABA forward pass.
 //
-// Phase 5: every vessel runs a fixed-base ABA forward dynamics pass
-// over its part tree with 6-DOF compliant spring-damper joints. Jolt
-// owns the vessel's CoM motion (rigid-body integration under contacts
-// + summed external wrenches); ABA computes flex of each part relative
-// to the vessel body via per-part 6-DOF state (delta_pos, delta_rot,
-// lin_vel, ang_vel) integrated semi-implicit Euler with substepping.
+// Phase 5.1: every vessel runs a fixed-base reduced-coordinate
+// Featherstone ABA forward dynamics pass over its part tree. Each
+// non-root part connects to its parent via a **spherical joint** —
+// 3 angular DOF about the joint anchor, with K_ang spring + C_ang
+// damper; translation between the two anchors is rigidly pinned.
+// Linear flex (delta_pos in vessel frame) is a *consequence* of
+// angular flex through lever arms — never integrated, never sprung.
+//
+// Jolt owns the vessel's CoM motion (rigid-body integration under
+// contacts + summed external wrenches). ABA owns the per-part flex
+// in reduced coords; the per-edge joint state is (q_i, ω_i) where
+// q_i is the rotation of child relative to parent at the anchor.
 //
 // Per tick:
 //  1. C# accumulates per-part forces (gravity, thrust, drag, contacts)
-//     into ext_force / ext_torque.
+//     into ext_force / ext_torque, vessel-body axes.
 //  2. Jolt steps the vessel body forward dt under summed wrench +
 //     contact response.
-//  3. ABA forward pass: subtract inertial share m × (a_CoM + α × r +
-//     ω × (ω × r)) from per-part force; spring + damper joint forces
-//     act between adjacent parts at the joint anchor; substep-integrate
-//     (delta_pos, delta_rot, lin_vel, ang_vel) per part.
-//  4. ModifyShapes on the vessel's MutableCompoundShape from the new
+//  3. ABA forward pass — fixed-base reduced-coord recursion (Ch. 7):
+//     outward kinematics (root → leaf) propagates spatial velocity;
+//     inward articulated-inertia pass (leaf → root) builds I^A and
+//     bias force at each link, with external wrench rotated into
+//     each part's CURRENT frame; outward acceleration solve produces
+//     qddot; semi-implicit Euler integrates joint state.
+//  4. The cumulative joint chain is unrolled into vessel-frame
+//     delta_pos / delta_rot per part, written to PartFlex for
+//     downstream consumers.
+//  5. ModifyShapes on the vessel's MutableCompoundShape from the new
 //     per-part offsets so collision geometry tracks visible flex.
-//  5. RNEA backward pass on the deflected geometry for break detection.
+//  6. RNEA backward pass on the deflected geometry for break detection.
 //
-// Frame: per-part flex state lives in vessel-body axes. Part's current
-// pose = (com_local + delta_pos, delta_rot). At rest, both are zero /
-// identity. The vessel's CoM motion (a_CoM, α) is read from Jolt
-// post-step; ABA only sees the flex residual.
+// Frame: PartFlex.delta_pos / delta_rot are in vessel-body axes
+// (cumulative result of the joint chain), so RouteContactForce,
+// RNEA, and ApplyFlexToBodies see the same semantics they did under
+// Phase 5.0. Joint-state integration internally uses parent-frame
+// angular velocity ω_i, stored in PartFlex.ang_vel.
 
 #ifndef LONGERON_TREE_H
 #define LONGERON_TREE_H
@@ -51,39 +63,48 @@ struct PartNode {
 };
 
 // Per-edge spring-damper config for the joint connecting a part to its
-// parent. Isotropic 6-DOF compliance for Phase 5.0:
-//   F_joint = -K_lin · displacement - C_lin · displacement_rate
+// parent. Phase 5.1: spherical joint — child anchor rigidly pinned to
+// parent anchor (3 translation DOF eliminated, no linear compliance).
+// Child has 3 angular DOF about that anchor, with isotropic spring +
+// damper:
 //   T_joint = -K_ang · rotation_error - C_ang · angular_velocity_diff
 // applied at the joint anchor (attach_local), equal+opposite on parent.
 //
-// Anisotropic per-axis stiffness (axial vs. shear, torsion vs. bending)
-// is a Phase 5.x extension — would need joint-frame basis vectors and
-// per-channel K/C. For v1, isotropic in vessel-body axes.
+// Anisotropic per-axis stiffness (torsion vs. bending) is a Phase 5.x
+// extension — would need joint-frame basis vectors and per-channel K/C.
+// For v1, isotropic in the parent's current frame.
 //
-// Units: K_lin in kN/m, C_lin in kN·s/m,
-//        K_ang in kN·m/rad, C_ang in kN·m·s/rad
+// Units: K_ang in kN·m/rad, C_ang in kN·m·s/rad
 // (consistent with vessel mass in tonnes, force in kN.)
 struct EdgeCompliance {
-    float k_lin;
-    float c_lin;
     float k_ang;
     float c_ang;
 };
 
-// Per-part flex state — the part's pose + 6-D twist relative to its
-// rigid rest configuration in vessel-body frame.
+// Per-part flex state. Phase 5.1 spherical-joint reduced coords:
+//   ang_vel   — joint-relative angular velocity ω_i in parent frame
+//               (the only true integrated DOF per edge).
+//   delta_rot — derived: cumulative rotation child-relative-to-vessel,
+//               composed from joint chain each substep.
+//   delta_pos — derived: child CoM deflection from rest in vessel frame,
+//               from joint-chain forward kinematics + lever arms.
+//   lin_vel   — unused (no linear DOF under spherical); kept zero.
 //
-// Rest pose (delta_pos = 0, delta_rot = identity, vels = 0): part is
+// Rest pose (delta_pos = 0, delta_rot = identity, ang_vel = 0): part is
 // where it would be if the vessel were rigid.
 //
-// Current pose:
+// Current pose (after each ABA tick):
 //   position_in_vessel_frame = com_local + delta_pos
 //   rotation_in_vessel_frame = delta_rot       (identity at rest)
+//
+// Layout retained from Phase 5.0 to keep RouteContactForce, RNEA, and
+// ApplyFlexToBodies unchanged. A defensible follow-up is to split a
+// per-edge JointState struct out of PartFlex.
 struct PartFlex {
-    JPH::Vec3 delta_pos;     // linear offset from rest, vessel axes
-    JPH::Quat delta_rot;     // rotation flex from rest, vessel axes
-    JPH::Vec3 lin_vel;       // linear velocity, vessel axes
-    JPH::Vec3 ang_vel;       // angular velocity, vessel axes
+    JPH::Vec3 delta_pos;     // derived: vessel-frame CoM deflection
+    JPH::Quat delta_rot;     // derived: vessel-frame cumulative rotation
+    JPH::Vec3 lin_vel;       // unused under spherical joints
+    JPH::Vec3 ang_vel;       // joint-relative ω in parent frame
 };
 
 // One vessel's spanning tree. Parts are stored in topology order: parent
@@ -151,6 +172,15 @@ struct VesselTree {
     // per-part diag records for the first kAbaDiagWindow ticks so we
     // can correlate post-decouple instability with input/output forces.
     int diag_tick = 0;
+
+    // First-tick guard for finite-diff acceleration: false until the
+    // tree has seen one full RunAbaPass call. While false, RunAbaPass
+    // skips the (v - prev_v)/dt computation (no prev_v to diff against)
+    // and sets last_a_body / last_alpha to zero. Reset on Upsert so a
+    // fresh topology rebuild can't inherit a stale velocity from
+    // an unrelated previous body that happened to share the same
+    // body_id.
+    bool has_prev_velocity = false;
 };
 
 // Per-part diag record output by ABA each tick during the first

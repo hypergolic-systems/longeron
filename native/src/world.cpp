@@ -771,7 +771,7 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
                    (unsigned)part_count, (unsigned)kMaxPartsPerVessel, body_id);
         // Skip the entire payload to keep the parser aligned.
         const size_t payload_size = static_cast<size_t>(part_count)
-            * (2 + 4 + 12 + 12 + 12 + 16);  // u16 + float + 3 × float3 + 4 × float
+            * (2 + 4 + 12 + 12 + 12 + 8);  // u16 + float + 3 × float3 + 2 × float (K_ang, C_ang)
         if (cur + payload_size <= end) cur += payload_size;
         else cur = end;
         return;
@@ -789,8 +789,6 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
         n.inertia_diag = ReadFloat3(cur, end);
         n.attach_local = ReadFloat3(cur, end);
         EdgeCompliance c;
-        c.k_lin = Read<float>(cur, end);
-        c.c_lin = Read<float>(cur, end);
         c.k_ang = Read<float>(cur, end);
         c.c_ang = Read<float>(cur, end);
         // Validate parent: must be < i (topology order) or kInvalidPartIdx.
@@ -914,21 +912,39 @@ void LongeronWorld::HandleForceAtPosition(const uint8_t*& cur, const uint8_t* en
 
     // BodyInterface::AddForce(BodyID, Vec3 force, RVec3 point) computes
     // the implicit torque (point - CoM) × force internally.
+    // Skip AddForce on kinematic bodies — Jolt's contract for kinematic
+    // motion is "externally driven by SetKinematicPose"; AddForce on a
+    // kinematic body still writes into its velocity field (because Jolt
+    // doesn't gate AddForce by motion type), which then pollutes our
+    // ABA finite-diff a_body computation. Per-part wrench accumulation
+    // below is unaffected.
     JPH::BodyInterface& bi = mPhysicsSystem.GetBodyInterface();
-    bi.AddForce(it->second, force, point);
+    if (bi.GetMotionType(it->second) != JPH::EMotionType::Kinematic) {
+        bi.AddForce(it->second, force, point);
+    }
 
     // Phase 4: route the force to the per-part external-wrench
     // accumulator so RNEA can subtract it from the inertial wrench
     // when computing per-edge transmitted force. Skip if part_idx
     // is unattributed (0xFFFF) or the body has no tree (static
     // bodies, single-part vessels we haven't sent a tree for, etc.).
+    //
+    // We pass body->GetPosition() (the body's *origin* in world), NOT
+    // GetCenterOfMassPosition(). com_local in our wire format is in
+    // vessel-rest / body-origin frame. If Jolt's auto-CoM differs
+    // from the body's mPosition (e.g., compound shape with sub-shapes
+    // whose volume-weighted center isn't at the origin), using
+    // GetCenterOfMassPosition() introduces a phantom lever-arm offset
+    // = body's auto-CoM shift. (BodyMassDiag instrumentation tracks
+    // this offset; the right reference for per-part wrench attribution
+    // is the body's origin, since that's what com_local is relative to.)
     if (part_idx != kInvalidPartIdx) {
         const JPH::BodyLockInterfaceNoLock& lock = mPhysicsSystem.GetBodyLockInterfaceNoLock();
         const JPH::Body* body = lock.TryGetBody(it->second);
         if (body != nullptr) {
             mTreeRegistry.AccumulateExternalForce(
                 user_id, part_idx, force, point,
-                body->GetCenterOfMassPosition(),
+                body->GetPosition(),
                 body->GetRotation());
         }
     }

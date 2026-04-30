@@ -31,7 +31,7 @@ void TreeRegistry::Upsert(uint32_t body_id,
         t.edge_compliance = std::move(compliance);
     } else {
         // Mismatch — fall back to defaults rather than risk OOB.
-        EdgeCompliance default_c{1.0e6f, 1.0e3f, 1.0e3f, 5.0f};
+        EdgeCompliance default_c{1.0e3f, 5.0f};
         t.edge_compliance.assign(t.nodes.size(), default_c);
     }
     // Re-size accumulators to match the new node count and zero them.
@@ -54,6 +54,18 @@ void TreeRegistry::Upsert(uint32_t body_id,
     t.rest_captured = false;
     t.rest_subshape_pos.clear();
     t.rest_subshape_rot.clear();
+
+    // Reset finite-diff guard so the next RunAbaPass tick on this
+    // tree skips the (v - prev_v)/dt computation. Without this, a
+    // re-Upsert on the same body_id could inherit stale prev velocity
+    // from the old session and produce a huge phantom a_body for the
+    // first tick.
+    t.has_prev_velocity = false;
+    t.last_v_body  = JPH::Vec3::sZero();
+    t.last_omega   = JPH::Vec3::sZero();
+    t.last_a_body  = JPH::Vec3::sZero();
+    t.last_alpha   = JPH::Vec3::sZero();
+    t.diag_tick = 0;
 }
 
 void TreeRegistry::Erase(uint32_t body_id) {
@@ -124,17 +136,23 @@ void TreeRegistry::RunAbaPass(
         JPH::Vec3 omega_world = body.GetAngularVelocity();
 
         // Finite-diff in world frame (rotation-history-independent),
-        // then rotate to body frame.
+        // then rotate to body frame. Skip until the tree has seen one
+        // full pass; otherwise the first tick after a topology rebuild
+        // can produce a huge phantom acceleration if static prev-state
+        // from a previous body session was inherited.
         JPH::Vec3 a_world     = JPH::Vec3::sZero();
         JPH::Vec3 alpha_world = JPH::Vec3::sZero();
-        auto pv = s_prev_lin_v.find(body_id);
-        auto pa = s_prev_ang_v.find(body_id);
-        if (pv != s_prev_lin_v.end() && pa != s_prev_ang_v.end()) {
-            a_world     = (v_world     - pv->second) * inv_dt;
-            alpha_world = (omega_world - pa->second) * inv_dt;
+        if (tree.has_prev_velocity) {
+            auto pv = s_prev_lin_v.find(body_id);
+            auto pa = s_prev_ang_v.find(body_id);
+            if (pv != s_prev_lin_v.end() && pa != s_prev_ang_v.end()) {
+                a_world     = (v_world     - pv->second) * inv_dt;
+                alpha_world = (omega_world - pa->second) * inv_dt;
+            }
         }
         s_prev_lin_v[body_id] = v_world;
         s_prev_ang_v[body_id] = omega_world;
+        tree.has_prev_velocity = true;
 
         tree.last_v_body = body_rot_inv * v_world;
         tree.last_omega  = body_rot_inv * omega_world;
