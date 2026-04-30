@@ -65,6 +65,42 @@ namespace Longeron.Native
     }
 
     /// <summary>
+    /// Phase 5 instability diagnostic — comparison between Jolt's
+    /// volume-weighted auto-CoM offset and the real mass-weighted
+    /// CoM offset for a vessel body. Emitted once per
+    /// VesselTreeUpdate; non-zero <c>Diff</c> proves Jolt's body CoM
+    /// is misplaced relative to the real mass distribution, which
+    /// causes per-part gravity contributions to not cancel and the
+    /// body to accumulate spurious torque.
+    /// </summary>
+    public struct BodyMassDiagRecord
+    {
+        public BodyHandle Body;
+        public float JoltAutoComX, JoltAutoComY, JoltAutoComZ;
+        public float RealComX, RealComY, RealComZ;
+        public float DiffX, DiffY, DiffZ;
+    }
+
+    /// <summary>
+    /// Phase 5 ABA per-part diagnostic — input forces and flex
+    /// response per tick, emitted only for the first
+    /// <c>kAbaDiagWindow</c> ticks of each body's life. Lets us
+    /// correlate post-decouple instability with the actual force
+    /// inputs and ABA's response.
+    /// </summary>
+    public struct AbaPartDiagRecord
+    {
+        public BodyHandle Body;
+        public ushort     Tick;
+        public ushort     PartIdx;
+        public float      ExtFX, ExtFY, ExtFZ;
+        public float      InertialFX, InertialFY, InertialFZ;
+        public float      FlexFX, FlexFY, FlexFZ;
+        public float      DeltaPosX, DeltaPosY, DeltaPosZ;
+        public float      DeltaAngleRad;
+    }
+
+    /// <summary>
     /// Per-part flex pose from the Phase 5 ABA forward pass, expressed
     /// in vessel-body-local axes. Identity when the part is at rest;
     /// non-zero under flex. Scene driver composes with the part's
@@ -195,6 +231,51 @@ namespace Longeron.Native
             record.ExtFX = *(float*)p;                     p += 4;
             record.ExtFY = *(float*)p;                     p += 4;
             record.ExtFZ = *(float*)p;                     p += 4;
+            _cursor += kPayload;
+        }
+
+        public void ReadAbaPartDiag(out AbaPartDiagRecord record)
+        {
+            const int kPayload = 60;  // body_id(4) + tick(2) + part_idx(2)
+                                       // + 4×float3(48) + delta_angle_rad(4)
+            EnsureBytes(kPayload);
+            byte* p = _ptr + _cursor;
+            record = default;
+            record.Body          = new BodyHandle(*(uint*)p);   p += 4;
+            record.Tick          = *(ushort*)p;                 p += 2;
+            record.PartIdx       = *(ushort*)p;                 p += 2;
+            record.ExtFX         = *(float*)p;                  p += 4;
+            record.ExtFY         = *(float*)p;                  p += 4;
+            record.ExtFZ         = *(float*)p;                  p += 4;
+            record.InertialFX    = *(float*)p;                  p += 4;
+            record.InertialFY    = *(float*)p;                  p += 4;
+            record.InertialFZ    = *(float*)p;                  p += 4;
+            record.FlexFX        = *(float*)p;                  p += 4;
+            record.FlexFY        = *(float*)p;                  p += 4;
+            record.FlexFZ        = *(float*)p;                  p += 4;
+            record.DeltaPosX     = *(float*)p;                  p += 4;
+            record.DeltaPosY     = *(float*)p;                  p += 4;
+            record.DeltaPosZ     = *(float*)p;                  p += 4;
+            record.DeltaAngleRad = *(float*)p;                  p += 4;
+            _cursor += kPayload;
+        }
+
+        public void ReadBodyMassDiag(out BodyMassDiagRecord record)
+        {
+            const int kPayload = 40;  // body_id(4) + 3 × float3(36)
+            EnsureBytes(kPayload);
+            byte* p = _ptr + _cursor;
+            record = default;
+            record.Body          = new BodyHandle(*(uint*)p);   p += 4;
+            record.JoltAutoComX  = *(float*)p;                  p += 4;
+            record.JoltAutoComY  = *(float*)p;                  p += 4;
+            record.JoltAutoComZ  = *(float*)p;                  p += 4;
+            record.RealComX      = *(float*)p;                  p += 4;
+            record.RealComY      = *(float*)p;                  p += 4;
+            record.RealComZ      = *(float*)p;                  p += 4;
+            record.DiffX         = *(float*)p;                  p += 4;
+            record.DiffY         = *(float*)p;                  p += 4;
+            record.DiffZ         = *(float*)p;                  p += 4;
             _cursor += kPayload;
         }
 

@@ -62,7 +62,9 @@ void RunAbaForwardStep(
     JPH::Vec3 omega,
     JPH::Vec3 a_body,
     JPH::Vec3 alpha,
-    float fixed_dt);
+    float fixed_dt,
+    uint32_t body_id,
+    std::vector<AbaPartDiagRecord>* diag_out);
 
 // Number of internal substeps per Jolt physics tick. With Phase 5.0
 // stiffness (kStiffnessScale=5×, kLinAngRatio=5) the highest natural
@@ -70,6 +72,14 @@ void RunAbaForwardStep(
 // dt × ω < 2, so dt < 20 ms is fine. We substep at 20× → 1 ms substep
 // → comfortable 5× margin.
 inline constexpr int kAbaSubsteps = 20;
+
+// Number of post-Upsert ticks during which ABA emits per-part diag
+// records (ext_force, F_inertial, F_flex, delta_pos, delta_angle).
+// 500 ticks ≈ 10 s at 50 Hz — long enough to capture the full
+// transient from decouple through visible disintegration. Each
+// record is ~60 bytes, ~10000 records over the window per vessel
+// → ~600 kB of KSP.log noise per vessel; manageable for debugging.
+inline constexpr int kAbaDiagWindow = 500;
 
 } // namespace longeron
 

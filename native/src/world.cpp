@@ -804,6 +804,43 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
     }
 
     mTreeRegistry.Upsert(body_id, std::move(nodes), std::move(compliance));
+
+    // Phase 5 instability diagnostic: emit a one-shot CoM-offset
+    // comparison so the C# side can log Jolt's volume-weighted auto-CoM
+    // vs. the real mass-weighted CoM. Mismatch → body's gravity-from-
+    // each-part lever arms don't cancel → spurious body torque after
+    // every topology rebuild. See branch featherstone-aba notes.
+    auto br_it = mBodyRegistry.find(body_id);
+    if (br_it != mBodyRegistry.end()) {
+        const JPH::BodyLockInterfaceNoLock& lock_iface =
+            mPhysicsSystem.GetBodyLockInterfaceNoLock();
+        JPH::BodyLockRead lock(lock_iface, br_it->second);
+        if (lock.Succeeded()) {
+            const JPH::Shape* shape = lock.GetBody().GetShape();
+            if (shape != nullptr) {
+                const JPH::Vec3 jolt_auto_com = shape->GetCenterOfMass();
+                const JPH::Vec3 real_com      = mTreeRegistry.ComputeRealCom(body_id);
+                const JPH::Vec3 diff          = real_com - jolt_auto_com;
+
+                constexpr size_t kSize = 1 + 4 + 12 + 12 + 12;  // 41 bytes
+                if (ReserveOutput(kSize)) {
+                    uint8_t* p = mOutputBuffer + mOutputLen;
+                    *p = static_cast<uint8_t>(RecordType::BodyMassDiag); p += 1;
+                    Write(p, body_id);
+                    Write(p, jolt_auto_com.GetX());
+                    Write(p, jolt_auto_com.GetY());
+                    Write(p, jolt_auto_com.GetZ());
+                    Write(p, real_com.GetX());
+                    Write(p, real_com.GetY());
+                    Write(p, real_com.GetZ());
+                    Write(p, diff.GetX());
+                    Write(p, diff.GetY());
+                    Write(p, diff.GetZ());
+                    mOutputLen += kSize;
+                }
+            }
+        }
+    }
 }
 
 void LongeronWorld::HandleSubShapeMap(const uint8_t*& cur, const uint8_t* end) {
@@ -1015,6 +1052,35 @@ int32_t LongeronWorld::Step(
     //     broadphase. Single body's outer-AABB refit; cheap unless
     //     vessels have many active contacts.
     mTreeRegistry.ApplyFlexToBodies(mPhysicsSystem, mBodyRegistry);
+
+    // 3b.1 ABA per-part diag records for first kAbaDiagWindow ticks per
+    //      body. 61 bytes each: tag(1) + body_id(4) + tick(2) + part_idx(2)
+    //      + 4 × float3(48) + delta_angle_rad(4).
+    {
+        constexpr size_t kSize = 61;
+        for (const auto& d : mTreeRegistry.GetLastAbaDiags()) {
+            if (!ReserveOutput(kSize)) break;
+            uint8_t* p = mOutputBuffer + mOutputLen;
+            *p = static_cast<uint8_t>(RecordType::AbaPartDiag); p += 1;
+            Write(p, d.body_id);
+            Write(p, d.tick);
+            Write(p, d.part_idx);
+            Write(p, d.ext_force.GetX());
+            Write(p, d.ext_force.GetY());
+            Write(p, d.ext_force.GetZ());
+            Write(p, d.f_inertial.GetX());
+            Write(p, d.f_inertial.GetY());
+            Write(p, d.f_inertial.GetZ());
+            Write(p, d.f_flex.GetX());
+            Write(p, d.f_flex.GetY());
+            Write(p, d.f_flex.GetZ());
+            Write(p, d.delta_pos.GetX());
+            Write(p, d.delta_pos.GetY());
+            Write(p, d.delta_pos.GetZ());
+            Write(p, d.delta_angle_rad);
+            mOutputLen += kSize;
+        }
+    }
 
     // 3c. Emit PartPose records — one per non-root part. Emitted BEFORE
     //     BodyPose so the C# drain populates JoltPart.FlexLocal* values

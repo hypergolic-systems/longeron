@@ -37,6 +37,14 @@ namespace Longeron
         const int kVerboseLogStride = 5;   // ~10 Hz at 50 Hz physics
         static long _rneaTickCounter = 0;
 
+        // Phase 5 diag: count ticks per body since first BodyMassDiag
+        // record (= just after BodyCreate / topology rebuild) so we can
+        // log body kinematics for the first ~30 ticks of each body's
+        // life. Used to spot post-decouple body torque / angular vel
+        // spikes that drive ABA flex divergence.
+        static readonly System.Collections.Generic.Dictionary<uint, int> _bodyDiagTickCount =
+            new System.Collections.Generic.Dictionary<uint, int>();
+
         // Called by LongeronAddon when a new flight-scene world is
         // created so per-world transient state resets.
         internal void NotifyWorldCreated()
@@ -126,10 +134,71 @@ namespace Longeron
                         if (JoltPart.TryGet(pose.Body.Id, out var ownerJb)
                             && ownerJb.Part != null
                             && ownerJb.Part.vessel != null)
+                        {
+                            // Phase 5 diag: log body angular velocity for the
+                            // first 30 ticks after a body comes online so we
+                            // can see whether the body itself spins up
+                            // post-decouple (= spurious torque) or stays
+                            // rotation-stable (= flex divergence is per-part).
+                            if (_bodyDiagTickCount.TryGetValue(pose.Body.Id, out int diagTicks))
+                            {
+                                if (diagTicks < 500)
+                                {
+                                    float lvm = Mathf.Sqrt(
+                                        pose.LinX * pose.LinX
+                                        + pose.LinY * pose.LinY
+                                        + pose.LinZ * pose.LinZ);
+                                    float avm = Mathf.Sqrt(
+                                        pose.AngX * pose.AngX
+                                        + pose.AngY * pose.AngY
+                                        + pose.AngZ * pose.AngZ);
+                                    Debug.Log("[Longeron/body-kin] " + string.Format(
+                                        "body={0} t={1} v=({2:F2},{3:F2},{4:F2}) |v|={5:F2} "
+                                        + "ω=({6:F3},{7:F3},{8:F3}) |ω|={9:F3}",
+                                        pose.Body.Id, diagTicks,
+                                        pose.LinX, pose.LinY, pose.LinZ, lvm,
+                                        pose.AngX, pose.AngY, pose.AngZ, avm));
+                                }
+                                _bodyDiagTickCount[pose.Body.Id] = diagTicks + 1;
+                            }
                             ApplyVesselPose(ownerJb.Part.vessel, pose, frame);
+                        }
                         break;
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out _);
+                        break;
+                    case RecordType.AbaPartDiag:
+                        world.Output.ReadAbaPartDiag(out var apd);
+                        Debug.Log("[Longeron/aba-tick] " + string.Format(
+                            "body={0} t={1} part={2} "
+                            + "ext=({3:+0.0;-0.0},{4:+0.0;-0.0},{5:+0.0;-0.0})kN "
+                            + "iner=({6:+0.0;-0.0},{7:+0.0;-0.0},{8:+0.0;-0.0})kN "
+                            + "flex=({9:+0.0;-0.0},{10:+0.0;-0.0},{11:+0.0;-0.0})kN "
+                            + "dp=({12:+0.00;-0.00},{13:+0.00;-0.00},{14:+0.00;-0.00})m "
+                            + "dRot={15:F2}°",
+                            apd.Body.Id, apd.Tick, apd.PartIdx,
+                            apd.ExtFX, apd.ExtFY, apd.ExtFZ,
+                            apd.InertialFX, apd.InertialFY, apd.InertialFZ,
+                            apd.FlexFX, apd.FlexFY, apd.FlexFZ,
+                            apd.DeltaPosX, apd.DeltaPosY, apd.DeltaPosZ,
+                            apd.DeltaAngleRad * Mathf.Rad2Deg));
+                        break;
+                    case RecordType.BodyMassDiag:
+                        world.Output.ReadBodyMassDiag(out var bmd);
+                        // Start tracking body kinematics for this newly-
+                        // registered body's first 30 ticks.
+                        _bodyDiagTickCount[bmd.Body.Id] = 0;
+                        Debug.Log("[Longeron/com-diag] " + string.Format(
+                            "body={0} jolt_auto=({1:F3},{2:F3},{3:F3}) "
+                            + "real_mass=({4:F3},{5:F3},{6:F3}) "
+                            + "diff=({7:F3},{8:F3},{9:F3}) |diff|={10:F3}",
+                            bmd.Body.Id,
+                            bmd.JoltAutoComX, bmd.JoltAutoComY, bmd.JoltAutoComZ,
+                            bmd.RealComX, bmd.RealComY, bmd.RealComZ,
+                            bmd.DiffX, bmd.DiffY, bmd.DiffZ,
+                            Mathf.Sqrt(bmd.DiffX * bmd.DiffX
+                                       + bmd.DiffY * bmd.DiffY
+                                       + bmd.DiffZ * bmd.DiffZ)));
                         break;
                     case RecordType.PartPose:
                         world.Output.ReadPartPose(out var pp);
@@ -360,6 +429,31 @@ namespace Longeron
             Vector3 anchorWorld = (Vector3)posWorld;
             Vector3 anchorVel = (Vector3)velWorld;
 
+            // Phase 5 diag: log Unity-side anchor + per-part values
+            // for the first 500 ticks per body so we can compare
+            // Jolt's body kinematics against what stock physics sees.
+            bool diagThisTick = false;
+            int diagTickIdx = 0;
+            if (_bodyDiagTickCount.TryGetValue(pose.Body.Id, out int dtc) && dtc < 500)
+            {
+                diagThisTick = true;
+                diagTickIdx = dtc;
+                Debug.Log("[Longeron/unity-anchor] " + string.Format(
+                    "body={0} t={1} pose_cb=({2:F2},{3:F2},{4:F2}) "
+                    + "anchor_world=({5:F2},{6:F2},{7:F2}) "
+                    + "anchor_vel=({8:F2},{9:F2},{10:F2}) |v|={11:F2} "
+                    + "alt={12:F1} mainBodyPos=({13:F1},{14:F1},{15:F1})",
+                    pose.Body.Id, diagTickIdx,
+                    pose.PosX, pose.PosY, pose.PosZ,
+                    anchorWorld.x, anchorWorld.y, anchorWorld.z,
+                    anchorVel.x, anchorVel.y, anchorVel.z,
+                    anchorVel.magnitude,
+                    v.altitude,
+                    v.mainBody != null ? v.mainBody.position.x : 0.0,
+                    v.mainBody != null ? v.mainBody.position.y : 0.0,
+                    v.mainBody != null ? v.mainBody.position.z : 0.0));
+            }
+
             foreach (var part in v.parts)
             {
                 if (part == null) continue;
@@ -381,6 +475,12 @@ namespace Longeron
                 Quaternion partRot = rotWorld * jb.FlexLocalRot * jb.PartLocalRot;
                 Vector3 partVel = anchorVel + Vector3.Cross(angWorldF, rWorld);
 
+                // Capture pre-write rb state so we can compare against
+                // what we're about to write — desync between Unity rb
+                // and computed pose would show up as a delta here.
+                Vector3 rbPosBefore = rb.position;
+                Vector3 rbVelBefore = rb.velocity;
+
                 rb.position        = partPos;
                 rb.rotation        = partRot;
                 rb.velocity        = partVel;
@@ -388,6 +488,32 @@ namespace Longeron
 
                 jb.LastVelocity        = partVel;
                 jb.LastAngularVelocity = angWorldF;
+
+                if (diagThisTick && jb.PartIdx != 0xFFFF)
+                {
+                    Vector3 dPos = partPos - rbPosBefore;
+                    Vector3 dVel = partVel - rbVelBefore;
+                    Debug.Log("[Longeron/unity-part] " + string.Format(
+                        "body={0} t={1} part={2} '{3}' "
+                        + "compute_pos=({4:F2},{5:F2},{6:F2}) "
+                        + "rb_pos_pre=({7:F2},{8:F2},{9:F2}) "
+                        + "Δpos=({10:+0.00;-0.00},{11:+0.00;-0.00},{12:+0.00;-0.00}) "
+                        + "compute_vel=({13:F2},{14:F2},{15:F2}) "
+                        + "rb_vel_pre=({16:F2},{17:F2},{18:F2}) "
+                        + "Δvel=({19:+0.00;-0.00},{20:+0.00;-0.00},{21:+0.00;-0.00}) "
+                        + "PartLocal=({22:F2},{23:F2},{24:F2}) "
+                        + "FlexLocal=({25:F2},{26:F2},{27:F2})",
+                        pose.Body.Id, diagTickIdx, jb.PartIdx,
+                        part.partInfo != null ? part.partInfo.name : part.name,
+                        partPos.x, partPos.y, partPos.z,
+                        rbPosBefore.x, rbPosBefore.y, rbPosBefore.z,
+                        dPos.x, dPos.y, dPos.z,
+                        partVel.x, partVel.y, partVel.z,
+                        rbVelBefore.x, rbVelBefore.y, rbVelBefore.z,
+                        dVel.x, dVel.y, dVel.z,
+                        jb.PartLocalPos.x, jb.PartLocalPos.y, jb.PartLocalPos.z,
+                        jb.FlexLocalPos.x, jb.FlexLocalPos.y, jb.FlexLocalPos.z));
+                }
             }
         }
 

@@ -146,6 +146,25 @@ struct VesselTree {
     JPH::Vec3 last_omega   = JPH::Vec3::sZero();
     JPH::Vec3 last_a_body  = JPH::Vec3::sZero();
     JPH::Vec3 last_alpha   = JPH::Vec3::sZero();
+
+    // Phase 5 diag: tick count since this tree was Upserted. ABA emits
+    // per-part diag records for the first kAbaDiagWindow ticks so we
+    // can correlate post-decouple instability with input/output forces.
+    int diag_tick = 0;
+};
+
+// Per-part diag record output by ABA each tick during the first
+// kAbaDiagWindow ticks of a body's life. Streams to C# log for
+// post-decouple instability investigation.
+struct AbaPartDiagRecord {
+    uint32_t body_id;
+    uint16_t tick;
+    uint16_t part_idx;
+    JPH::Vec3 ext_force;
+    JPH::Vec3 f_inertial;
+    JPH::Vec3 f_flex;
+    JPH::Vec3 delta_pos;
+    float     delta_angle_rad;
 };
 
 // Per-vessel RNEA pass output. Filled by RunAdvisoryPass each tick;
@@ -223,6 +242,12 @@ public:
                 std::vector<PartNode>&& nodes,
                 std::vector<EdgeCompliance>&& compliance);
 
+    // Compute the real mass-weighted CoM offset (in vessel-root frame)
+    // from PartNodes for a given vessel. Returns zero if the body has
+    // no tree or zero total mass. Used by Phase 5 diagnostics to compare
+    // against Jolt's auto-CoM (which is volume × density weighted).
+    JPH::Vec3 ComputeRealCom(uint32_t body_id) const;
+
     // Drop a vessel's tree (called on BodyDestroy).
     void Erase(uint32_t body_id);
 
@@ -295,6 +320,7 @@ public:
 
     const std::vector<RneaSummary>& GetLastSummaries() const { return mLastSummaries; }
     const std::vector<EdgeWrenchRecord>& GetLastEdgeWrenches() const { return mLastEdgeWrenches; }
+    const std::vector<AbaPartDiagRecord>& GetLastAbaDiags() const { return mLastAbaDiags; }
     const std::unordered_map<uint32_t, VesselTree>& GetTrees() const { return mTrees; }
 
 private:
@@ -306,6 +332,7 @@ private:
     // at the start of each respective fill.
     std::vector<RneaSummary>        mLastSummaries;
     std::vector<EdgeWrenchRecord>   mLastEdgeWrenches;
+    std::vector<AbaPartDiagRecord>  mLastAbaDiags;
 
     // Last step at which we emitted a summary. Throttle to keep
     // KSP.log readable while per-edge wrenches still flow every tick.

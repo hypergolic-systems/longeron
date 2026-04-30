@@ -86,6 +86,26 @@ enum class RecordType : uint8_t {
                              //   orthonormal pair. Emitted every tick; C# stashes on JoltPart so
                              //   PartModules can read on the next tick's OnFixedUpdate to make
                              //   break decisions.
+    AbaPartDiag       = 70,  // u32 body_id, u16 tick, u16 part_idx,
+                             //   float3 ext_force      (per-part accumulated wrench, body frame),
+                             //   float3 f_inertial     (m × a_part, body frame),
+                             //   float3 f_flex         (ext - inertial, the ABA flex driver),
+                             //   float3 delta_pos      (per-part flex offset from rest, body frame),
+                             //   float  delta_angle    (axis-angle magnitude of delta_rot, radians).
+                             //   Phase 5 instability investigation: emitted per part per tick for the
+                             //   first 30 ticks after each BodyCreate so we can see how F_flex grows.
+    BodyMassDiag      = 69,  // u32 body_id,
+                             //   float3 jolt_auto_com_offset    (compound's GetCenterOfMass() — auto-
+                             //                                   computed in root frame from sub-shape
+                             //                                   volume × density),
+                             //   float3 real_mass_com_offset    (mass-weighted from PartNode mass +
+                             //                                   com_local — true mass distribution),
+                             //   float3 diff                    (real − auto; non-zero proves Jolt's
+                             //                                   body CoM is misplaced relative to
+                             //                                   the real mass distribution).
+                             //   Phase 5 ABA stability investigation: emitted once per
+                             //   VesselTreeUpdate so we can correlate post-decouple
+                             //   instability with CoM-offset mismatch.
     PartPose          = 68,  // u32 vessel_body_id, u16 part_idx,
                              //   float3 delta_pos (vessel-body axes — flex offset from rest CoM),
                              //   float4 delta_rot (vessel-body axes — flex rotation from rest,

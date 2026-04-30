@@ -60,6 +60,20 @@ void TreeRegistry::Erase(uint32_t body_id) {
     mTrees.erase(body_id);
 }
 
+JPH::Vec3 TreeRegistry::ComputeRealCom(uint32_t body_id) const {
+    auto it = mTrees.find(body_id);
+    if (it == mTrees.end()) return JPH::Vec3::sZero();
+    const VesselTree& t = it->second;
+    JPH::Vec3 sum = JPH::Vec3::sZero();
+    float total_mass = 0.0f;
+    for (const auto& n : t.nodes) {
+        sum = sum + n.com_local * n.mass;
+        total_mass += n.mass;
+    }
+    if (total_mass <= 1.0e-9f) return JPH::Vec3::sZero();
+    return sum / total_mass;
+}
+
 void TreeRegistry::SetSubShapeMap(uint32_t body_id, std::vector<uint16_t>&& subshape_to_part) {
     // Tree may not exist yet (BodyCreate + SubShapeMap arrive before
     // VesselTreeUpdate in the same input batch); create a stub entry
@@ -74,6 +88,7 @@ void TreeRegistry::RunAbaPass(
     const std::unordered_map<uint32_t, JPH::BodyID>& registry,
     float fixed_dt)
 {
+    mLastAbaDiags.clear();
     if (mTrees.empty()) return;
 
     // Previous-tick velocities per body for finite-diff acceleration.
@@ -133,6 +148,7 @@ void TreeRegistry::RunAbaPass(
         int& tc = s_tick_count[body_id];
         if (tc < kAbaWarmupTicks) {
             ++tc;
+            ++tree.diag_tick;
             // Drain accumulator anyway — RunAdvisoryPass would otherwise
             // see stale ext_force from before warm-up ended.
             // (Actually RunAdvisoryPass drains itself, so leave alone.)
@@ -142,7 +158,11 @@ void TreeRegistry::RunAbaPass(
         RunAbaForwardStep(tree,
             tree.last_v_body, tree.last_omega,
             tree.last_a_body, tree.last_alpha,
-            fixed_dt);
+            fixed_dt,
+            body_id,
+            &mLastAbaDiags);
+
+        ++tree.diag_tick;
     }
 }
 
@@ -243,13 +263,32 @@ void TreeRegistry::ApplyFlexToBodies(
         if (!modified) continue;
 
         // NotifyShapeChanged refits the broadphase AABB + invalidates
-        // narrow-phase contact cache for this body. Pass DontActivate
-        // so a sleeping vessel doesn't wake from its flex update; mass
-        // properties don't change because per-part mass is unchanged
-        // and the small-deflection approximation lets the vessel
-        // CoM/inertia tensor stay as Jolt computed at body-create.
+        // narrow-phase contact cache for this body. The
+        // inPreviousCenterOfMass parameter is CRITICAL — Jolt does
+        // `body.mPosition += rotation × (shape->GetCenterOfMass() -
+        // inPreviousCenterOfMass)` to keep the body's anchor in the
+        // same world location across CoM changes (Body.cpp::
+        // UpdateCenterOfMassInternal). For us the shape's CoM doesn't
+        // change between ModifyShapes calls (ModifyShape doesn't
+        // recompute mCenterOfMass), so passing the SAME value as the
+        // shape's current CoM gives a zero shift — which is what we
+        // want, since we're only moving sub-shapes, not the
+        // body-frame origin.
+        //
+        // Passing sZero (the bug we just fixed) caused the body to
+        // teleport by `rotation × shape.CoM` every tick once flex
+        // exceeded the any-flex threshold, manifesting as a constant
+        // ~1.5 m drift per tick perpendicular to gravity.
+        JPH::Vec3 com_now = JPH::Vec3::sZero();
+        {
+            JPH::BodyLockRead read_lock(lock_iface, jph_id);
+            if (read_lock.Succeeded()) {
+                const JPH::Shape* s = read_lock.GetBody().GetShape();
+                if (s != nullptr) com_now = s->GetCenterOfMass();
+            }
+        }
         body_iface.NotifyShapeChanged(jph_id,
-            /*old_com*/ JPH::Vec3::sZero(),
+            /*old_com*/ com_now,
             /*update_mass*/ false,
             JPH::EActivation::DontActivate);
     }

@@ -72,7 +72,9 @@ void RunAbaForwardStep(
     JPH::Vec3 omega,
     JPH::Vec3 a_body,
     JPH::Vec3 alpha,
-    float fixed_dt)
+    float fixed_dt,
+    uint32_t body_id,
+    std::vector<AbaPartDiagRecord>* diag_out)
 {
     (void)v_body; // not used for the flex residual — only a_body matters
     const size_t n = tree.nodes.size();
@@ -109,6 +111,26 @@ void RunAbaForwardStep(
 
         F_flex[i] = tree.ext_force[i]  - F_inertial;
         T_flex[i] = tree.ext_torque[i] - T_inertial;
+
+        // Phase 5 ABA tick diag — first kAbaDiagWindow ticks per body.
+        if (diag_out != nullptr && tree.diag_tick < kAbaDiagWindow) {
+            AbaPartDiagRecord rec;
+            rec.body_id    = body_id;
+            rec.tick       = static_cast<uint16_t>(tree.diag_tick);
+            rec.part_idx   = static_cast<uint16_t>(i);
+            rec.ext_force  = tree.ext_force[i];
+            rec.f_inertial = F_inertial;
+            rec.f_flex     = F_flex[i];
+            rec.delta_pos  = tree.flex[i].delta_pos;
+            // Axis-angle magnitude of delta_rot (radians).
+            JPH::Quat q = tree.flex[i].delta_rot;
+            if (q.GetW() < 0.0f) q = JPH::Quat(-q.GetX(), -q.GetY(), -q.GetZ(), -q.GetW());
+            float vmag = std::sqrt(q.GetX()*q.GetX() + q.GetY()*q.GetY() + q.GetZ()*q.GetZ());
+            rec.delta_angle_rad = (vmag > 1.0e-6f)
+                ? 2.0f * std::atan2(vmag, q.GetW())
+                : 0.0f;
+            diag_out->push_back(rec);
+        }
     }
 
     // Substep loop — semi-implicit (symplectic) Euler:

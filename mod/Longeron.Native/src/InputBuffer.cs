@@ -35,6 +35,8 @@ namespace Longeron.Native
         RneaSummary       = 66,
         JointWrench       = 67,
         PartPose          = 68,
+        BodyMassDiag      = 69,
+        AbaPartDiag       = 70,
     }
 
     /// <summary>
