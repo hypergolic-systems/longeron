@@ -65,7 +65,7 @@ namespace Longeron.Patches
         {
             if (LongeronAddon.ActiveWorld == null) return false;
             if (rb == null) return false;
-            var jb = rb.GetComponent<JoltBody>();
+            var jb = rb.GetComponent<JoltPart>();
             if (jb == null) return false;
 
             var frame = CbFrame.Current();
@@ -90,7 +90,7 @@ namespace Longeron.Patches
         {
             if (LongeronAddon.ActiveWorld == null) return false;
             if (rb == null) return false;
-            var jb = rb.GetComponent<JoltBody>();
+            var jb = rb.GetComponent<JoltPart>();
             if (jb == null) return false;
 
             var frame = CbFrame.Current();

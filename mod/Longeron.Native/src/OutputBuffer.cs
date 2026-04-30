@@ -20,7 +20,7 @@ namespace Longeron.Native
     /// <summary>
     /// Per-edge joint wrench, decomposed in the joint's reference
     /// frame. Emitted every tick; the scene driver stashes these on
-    /// each part's <see cref="JoltBody"/> so a PartModule can read the
+    /// each part's <see cref="JoltPart"/> so a PartModule can read the
     /// previous tick's values on its OnFixedUpdate to decide whether
     /// to break.
     /// </summary>

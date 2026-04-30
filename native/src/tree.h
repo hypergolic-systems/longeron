@@ -97,7 +97,7 @@ struct RneaSummary {
 };
 
 // Per-edge wrench decomposition emitted every tick. PartModules read
-// these (via JoltBody) on the next tick's OnFixedUpdate to decide
+// these (via JoltPart) on the next tick's OnFixedUpdate to decide
 // whether to break. f_axial is signed: +compression / -tension.
 // t_axial is signed (torsion direction). f_shear and t_bending are
 // magnitudes (unsigned).

@@ -1,5 +1,5 @@
 // Patch Unity's Rigidbody velocity / angularVelocity property
-// accessors so reads/writes route through a JoltBody backing field
+// accessors so reads/writes route through a JoltPart backing field
 // when one's attached to the rb's GameObject.
 //
 // Why: Unity silently no-ops rb.velocity / rb.angularVelocity writes
@@ -26,7 +26,7 @@ namespace Longeron.Patches
         [HarmonyPostfix]
         static void Postfix(Rigidbody __instance, ref Vector3 __result)
         {
-            var jb = __instance.GetComponent<JoltBody>();
+            var jb = __instance.GetComponent<JoltPart>();
             if (jb != null) __result = jb.LastVelocity;
         }
     }
@@ -37,7 +37,7 @@ namespace Longeron.Patches
         [HarmonyPrefix]
         static void Prefix(Rigidbody __instance, Vector3 value)
         {
-            var jb = __instance.GetComponent<JoltBody>();
+            var jb = __instance.GetComponent<JoltPart>();
             if (jb != null) jb.LastVelocity = value;
             // Let the original run too. For kinematic rbs it's a
             // silent no-op (no harm); for any future non-kinematic
@@ -51,7 +51,7 @@ namespace Longeron.Patches
         [HarmonyPostfix]
         static void Postfix(Rigidbody __instance, ref Vector3 __result)
         {
-            var jb = __instance.GetComponent<JoltBody>();
+            var jb = __instance.GetComponent<JoltPart>();
             if (jb != null) __result = jb.LastAngularVelocity;
         }
     }
@@ -62,7 +62,7 @@ namespace Longeron.Patches
         [HarmonyPrefix]
         static void Prefix(Rigidbody __instance, Vector3 value)
         {
-            var jb = __instance.GetComponent<JoltBody>();
+            var jb = __instance.GetComponent<JoltPart>();
             if (jb != null) jb.LastAngularVelocity = value;
         }
     }

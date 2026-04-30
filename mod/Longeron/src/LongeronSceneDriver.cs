@@ -3,7 +3,7 @@
 //
 // Per-tick flow:
 //   - Reconcile any pending topology mutations (decouple, dock,
-//     joint break, body destroy queue from JoltBody/QuadBody/
+//     joint break, body destroy queue from JoltPart/QuadBody/
 //     StaticBody OnDestroy) into the bridge input buffer.
 //   - Per-vessel pre-step setup: re-apply kinematic takeover (the
 //     OnGoOffRails one-shot can race Part.Unpack and silently miss
@@ -60,7 +60,7 @@ namespace Longeron
 
             // Topology mutations queued during the prior frame
             // (decouple, couple, dock, joint break, vessel destroy)
-            // and any pending body destroys from JoltBody.OnDestroy
+            // and any pending body destroys from JoltPart.OnDestroy
             // get reconciled into the bridge first, before per-tick
             // pose / force records ride the same input buffer.
             TopologyReconciler.Reconcile(world.Input, frame);
@@ -99,7 +99,7 @@ namespace Longeron
 
             // Drain output. Single-body model: one BodyPose per vessel.
             // The handle's reverse lookup gives us the vessel root
-            // JoltBody (only the owner is registered in _byHandle); we
+            // JoltPart (only the owner is registered in _byHandle); we
             // propagate the vessel's pose to every member part by
             // composing with the captured local offsets.
             RecordType type;
@@ -109,7 +109,7 @@ namespace Longeron
                 {
                     case RecordType.BodyPose:
                         world.Output.ReadBodyPose(out var pose);
-                        if (JoltBody.TryGet(pose.Body.Id, out var ownerJb)
+                        if (JoltPart.TryGet(pose.Body.Id, out var ownerJb)
                             && ownerJb.Part != null
                             && ownerJb.Part.vessel != null)
                             ApplyVesselPose(ownerJb.Part.vessel, pose, frame);
@@ -119,7 +119,7 @@ namespace Longeron
                         break;
                     case RecordType.JointWrench:
                         world.Output.ReadJointWrench(out var jw);
-                        if (JoltBody.TryGet(jw.Body.Id, out var jwOwner)
+                        if (JoltPart.TryGet(jw.Body.Id, out var jwOwner)
                             && jwOwner.Part != null
                             && jwOwner.Part.vessel != null
                             && SceneRegistry.TryGet(jwOwner.Part.vessel, out var jwMv)
@@ -128,7 +128,7 @@ namespace Longeron
                             var jwPart = jwMv.PartsByIdx[jw.PartIdx];
                             if (jwPart != null && jwPart.gameObject != null)
                             {
-                                var jb = jwPart.gameObject.GetComponent<JoltBody>();
+                                var jb = jwPart.gameObject.GetComponent<JoltPart>();
                                 if (jb != null)
                                 {
                                     jb.LastJointFAxial   = jw.FAxial;
@@ -141,7 +141,7 @@ namespace Longeron
                         break;
                     case RecordType.RneaSummary:
                         world.Output.ReadRneaSummary(out var rnea);
-                        if (JoltBody.TryGet(rnea.Body.Id, out var rneaOwner)
+                        if (JoltPart.TryGet(rnea.Body.Id, out var rneaOwner)
                             && rneaOwner.Part != null
                             && rneaOwner.Part.vessel != null)
                         {
@@ -212,7 +212,7 @@ namespace Longeron
                 if (m > 0f) total += m;
 
                 var jb = part.gameObject != null
-                    ? part.gameObject.GetComponent<JoltBody>()
+                    ? part.gameObject.GetComponent<JoltPart>()
                     : null;
                 if (jb != null) jb.LastMass = m;
             }
@@ -263,7 +263,7 @@ namespace Longeron
                 var rb = part.rb;
                 if (rb == null) continue;
                 var jb = part.gameObject != null
-                    ? part.gameObject.GetComponent<JoltBody>()
+                    ? part.gameObject.GetComponent<JoltPart>()
                     : null;
                 if (jb == null) continue;
 
@@ -299,10 +299,10 @@ namespace Longeron
             if (v.rootPart == null || v.rootPart.rb == null) return;
             if (v.orbit == null || v.mainBody == null) return;
 
-            // Read velocity from JoltBody rather than rb.velocity:
+            // Read velocity from JoltPart rather than rb.velocity:
             // Harmony postfixes on extern get_velocity aren't always
             // honored under Mono, so rb.velocity may still return 0 for
-            // kinematic bodies. JoltBody.LastVelocity reflects what
+            // kinematic bodies. JoltPart.LastVelocity reflects what
             // ApplyPoseToRigidbody set on rb.velocity.
             //
             // With Krakensbane patched out (FrameVel ≡ 0):
@@ -321,7 +321,7 @@ namespace Longeron
             // shortcut from rb.velocity since the orbit isn't always
             // current at our +10000 execution order.
             var rootRb = v.rootPart.rb;
-            var rootJb = rootRb.GetComponent<JoltBody>();
+            var rootJb = rootRb.GetComponent<JoltPart>();
             Vector3d rbVel = rootJb != null
                 ? (Vector3d)rootJb.LastVelocity
                 : (Vector3d)rootRb.velocity;
@@ -363,7 +363,7 @@ namespace Longeron
             }
 
             // Angular velocity in vessel-local frame (matches
-            // VesselPrecalculate:645). Same JoltBody-direct approach as
+            // VesselPrecalculate:645). Same JoltPart-direct approach as
             // linear velocity above.
             Vector3 rootAngV = rootJb != null
                 ? rootJb.LastAngularVelocity

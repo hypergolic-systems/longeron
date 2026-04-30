@@ -20,7 +20,7 @@
 // motion, decomposing into per-edge stresses for break detection.
 //
 // Body destruction for unexpected GameObject teardown (crash, splash
-// damage, scene exit) is handled by JoltBody.OnDestroy → pending
+// damage, scene exit) is handled by JoltPart.OnDestroy → pending
 // destroy queue, drained at the start of every reconcile pass.
 
 using System.Collections.Generic;
@@ -49,14 +49,14 @@ namespace Longeron.Integration
             _dirty.Clear();
         }
 
-        // Drain pending body destroys (from JoltBody.OnDestroy) plus
+        // Drain pending body destroys (from JoltPart.OnDestroy) plus
         // process every dirty vessel. Called from
         // LongeronSceneDriver.FixedUpdate before per-vessel pre-step
         // setup so all topology mutations land in the same input
         // buffer as the per-tick pose / force records.
         public static void Reconcile(InputBuffer input, CbFrame frame)
         {
-            JoltBody.DrainPendingDestroys(input);
+            JoltPart.DrainPendingDestroys(input);
 
             if (_dirty.Count == 0) return;
 
@@ -95,14 +95,14 @@ namespace Longeron.Integration
             // Topology diff detected → rebuild the vessel body from
             // scratch. Destroy any prior body (the reconciler-level
             // destroy is for the case where the body still exists but
-            // its part composition has changed; the JoltBody.OnDestroy
+            // its part composition has changed; the JoltPart.OnDestroy
             // queue handles the case where the owning Part GameObject
             // itself was destroyed).
             if (mv.Body.IsValid)
             {
                 input.WriteBodyDestroy(mv.Body);
                 mv.Body = default;
-                // Detach the JoltBody handle on every former member so
+                // Detach the JoltPart handle on every former member so
                 // any further AddForce calls land nowhere. The MonoBe-
                 // haviours stay on the Part GameObjects; they get
                 // re-attached below for the new body.
@@ -120,7 +120,7 @@ namespace Longeron.Integration
                 {
                     if (p == null || p.gameObject == null) continue;
                     if (p.vessel != null && p.vessel != v) continue;
-                    var jb = p.gameObject.GetComponent<JoltBody>();
+                    var jb = p.gameObject.GetComponent<JoltPart>();
                     if (jb != null) { jb.Handle = default; jb.OwnsBody = false; }
                 }
             }
@@ -165,7 +165,7 @@ namespace Longeron.Integration
             {
                 if (p == null || p.gameObject == null) continue;
                 bool isRoot = (p == root);
-                var jb = JoltBody.AttachTo(p, newHandle, ownsBody: isRoot);
+                var jb = JoltPart.AttachTo(p, newHandle, ownsBody: isRoot);
                 if (jb == null) continue;
                 if (mv.PartOffsets.TryGetValue(p, out var off))
                 {
@@ -235,7 +235,7 @@ namespace Longeron.Integration
 
             // Snapshot BFS order onto the ManagedVessel so SceneDriver
             // can resolve per-edge JointWrench records (which carry
-            // part_idx) back to a Part for stashing on JoltBody.
+            // part_idx) back to a Part for stashing on JoltPart.
             mv.PartsByIdx.Clear();
             for (int i = 0; i < n; ++i) mv.PartsByIdx.Add(_bfsScratch[i]);
 
@@ -251,12 +251,12 @@ namespace Longeron.Integration
                 var p = _bfsScratch[i];
                 ref var node = ref _treeNodeScratch[i];
 
-                // Stamp the per-part index on the JoltBody so
+                // Stamp the per-part index on the JoltPart so
                 // RigidbodyForceHooks can attribute force records
                 // back to this position in the tree.
                 if (p.gameObject != null)
                 {
-                    var jbStamp = p.gameObject.GetComponent<JoltBody>();
+                    var jbStamp = p.gameObject.GetComponent<JoltPart>();
                     if (jbStamp != null) jbStamp.PartIdx = (ushort)i;
                 }
 
@@ -412,7 +412,7 @@ namespace Longeron.Integration
                 {
                     if (p == null || p.gameObject == null) continue;
                     if (p.vessel != null && p.vessel != v) continue;
-                    var jb = p.gameObject.GetComponent<JoltBody>();
+                    var jb = p.gameObject.GetComponent<JoltPart>();
                     if (jb != null) { jb.Handle = default; jb.OwnsBody = false; }
                 }
             }

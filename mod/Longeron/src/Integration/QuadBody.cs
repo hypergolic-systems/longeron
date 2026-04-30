@@ -1,7 +1,7 @@
 // QuadBody — MonoBehaviour attached to every PQS quad GameObject we've
 // mirrored into Jolt as a static MeshShape body.
 //
-// Mirrors the JoltBody pattern from Phase 2.5: the resource (Jolt
+// Mirrors the JoltPart pattern from Phase 2.5: the resource (Jolt
 // body) is owned by the GameObject, and the GameObject's destruction
 // queues the matching BodyDestroy via Unity's component lifecycle. No
 // periodic sweep, no per-quad bookkeeping in a side dictionary.
@@ -49,7 +49,7 @@ namespace Longeron.Integration
 
         void OnDestroy()
         {
-            JoltBody.EnqueuePendingDestroy(Handle);
+            JoltPart.EnqueuePendingDestroy(Handle);
             Active.Remove(this);
         }
     }

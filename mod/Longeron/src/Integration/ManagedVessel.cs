@@ -40,7 +40,7 @@ namespace Longeron.Integration
         // Populated by TopologyReconciler.EmitVesselTree alongside
         // the VesselTreeUpdate record. Used by SceneDriver to map
         // incoming JointWrench records back to a Part for stashing
-        // on its JoltBody.
+        // on its JoltPart.
         public List<Part> PartsByIdx { get; }
             = new List<Part>();
 

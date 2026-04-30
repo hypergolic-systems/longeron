@@ -76,7 +76,7 @@ enum class RecordType : uint8_t {
                              //   float t_axial (signed torsion),
                              //   float t_bending (magnitude)
                              //   Per-edge wrench in joint reference frame. Emitted every tick;
-                             //   C# stashes on JoltBody so PartModules can read on the next
+                             //   C# stashes on JoltPart so PartModules can read on the next
                              //   tick's OnFixedUpdate to make break decisions.
 };
 

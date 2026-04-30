@@ -6,8 +6,8 @@
 // on vessel destruction). OnGoOnRails calls Unregister directly for
 // the synchronous "leaving physics" case.
 //
-// Body / part lookup is NOT here — JoltBody.TryGet on the static
-// component-keyed dict gives bodyId → JoltBody → Part. This module
+// Body / part lookup is NOT here — JoltPart.TryGet on the static
+// component-keyed dict gives bodyId → JoltPart → Part. This module
 // only owns the vessel-level grouping.
 //
 // Body handle IDs are minted from a per-process monotonic counter so

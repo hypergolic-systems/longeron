@@ -183,7 +183,7 @@ namespace Longeron
             }
             SceneRegistry.Clear();
             TopologyReconciler.Clear();
-            JoltBody.ClearPendingDestroys();
+            JoltPart.ClearPendingDestroys();
         }
     }
 }

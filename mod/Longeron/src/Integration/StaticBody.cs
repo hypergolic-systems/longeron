@@ -4,7 +4,7 @@
 //
 // Same shape as QuadBody (PQS terrain quads): the resource (Jolt body)
 // is owned by the GameObject, and OnDestroy queues the matching
-// BodyDestroy via JoltBody.EnqueuePendingDestroy. No periodic sweep,
+// BodyDestroy via JoltPart.EnqueuePendingDestroy. No periodic sweep,
 // no side-table bookkeeping.
 //
 // Unlike PQS quads (which are pooled by PQSCache and don't fire Unity
@@ -39,7 +39,7 @@ namespace Longeron.Integration
 
         void OnDestroy()
         {
-            JoltBody.EnqueuePendingDestroy(Handle);
+            JoltPart.EnqueuePendingDestroy(Handle);
             Active.Remove(this);
         }
 

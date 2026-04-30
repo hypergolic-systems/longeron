@@ -1,14 +1,21 @@
-// JoltBody — MonoBehaviour attached to every Part GameObject Longeron
-// manages. Carries the BodyHandle that maps the part to its Jolt body.
+// JoltPart — MonoBehaviour attached to every Part GameObject Longeron
+// manages. Carries the BodyHandle that maps the part to its vessel's
+// Jolt body, plus per-part state (BFS index, local offset from vessel
+// root, last-tick velocity, last-tick joint wrench from RNEA).
+//
+// Naming note: in the single-body model every part shares one Jolt body
+// (the vessel's), so this component represents the "Jolt-aware part",
+// not a Jolt body of its own. A future per-vessel JoltPart component
+// (root-only) may take over the body-handle ownership semantics.
 //
 // Why a component instead of a Dictionary<Rigidbody, BodyHandle> in
 // SceneRegistry: the lookup is on the hot path (every Rigidbody.AddForce
 // call from stock and modded code goes through it). A
-// Rigidbody.GetComponent<JoltBody>() is one Unity-native O(1) probe and
+// Rigidbody.GetComponent<JoltPart>() is one Unity-native O(1) probe and
 // cleans itself up automatically when the GameObject is destroyed.
 //
 // ECS-style ownership: when Unity destroys a Part GameObject (crash,
-// splash damage, fairing despawn, scene exit) JoltBody.OnDestroy fires
+// splash damage, fairing despawn, scene exit) JoltPart.OnDestroy fires
 // automatically and queues a BodyDestroy for our handle.
 // TopologyReconciler drains the queue at the start of each FixedUpdate
 // before processing dirty vessels, so the body cleanup rides the same
@@ -22,7 +29,7 @@ using UnityEngine;
 namespace Longeron
 {
     [DisallowMultipleComponent]
-    public sealed class JoltBody : MonoBehaviour
+    public sealed class JoltPart : MonoBehaviour
     {
         // Single-body model: every Part in a vessel shares the SAME
         // BodyHandle (the vessel's). Only the OwnsBody == true part
@@ -97,19 +104,19 @@ namespace Longeron
 
         // Pending body destroys from GameObjects Unity has destroyed
         // since the last drain. Static so the queue survives even when
-        // a JoltBody's component is gone — the queue is keyed by
+        // a JoltPart's component is gone — the queue is keyed by
         // BodyHandle, not by component reference.
         static readonly Queue<BodyHandle> _pendingDestroy = new Queue<BodyHandle>();
 
-        // BodyHandle.Id → JoltBody reverse lookup. The bridge emits
+        // BodyHandle.Id → JoltPart reverse lookup. The bridge emits
         // output records (BodyPose, ContactReport) keyed by uint body
         // id; the driver uses this map to find the corresponding Part
         // and rigidbody. Forward lookup (Part → BodyHandle) is just
-        // `part.gameObject.GetComponent<JoltBody>().Handle`.
-        static readonly Dictionary<uint, JoltBody> _byHandle =
-            new Dictionary<uint, JoltBody>();
+        // `part.gameObject.GetComponent<JoltPart>().Handle`.
+        static readonly Dictionary<uint, JoltPart> _byHandle =
+            new Dictionary<uint, JoltPart>();
 
-        // Attach a JoltBody component to the given Part. Pass
+        // Attach a JoltPart component to the given Part. Pass
         // ownsBody=true on the vessel root (the part whose transform
         // anchored the BodyCreate); pass false on every other part in
         // the vessel — they share the handle but don't own the
@@ -117,15 +124,15 @@ namespace Longeron
         // should set them after attach.
         //
         // For single-body, multiple parts register against the same
-        // handle. _byHandle stores only the *owner* JoltBody so the
-        // reverse lookup (handle → JoltBody → Vessel) goes through
+        // handle. _byHandle stores only the *owner* JoltPart so the
+        // reverse lookup (handle → JoltPart → Vessel) goes through
         // the root part — output records like BodyPose are
         // vessel-level and only the owner needs to receive them.
-        public static JoltBody AttachTo(Part part, BodyHandle handle, bool ownsBody)
+        public static JoltPart AttachTo(Part part, BodyHandle handle, bool ownsBody)
         {
             if (part == null || part.gameObject == null) return null;
-            var jb = part.gameObject.GetComponent<JoltBody>();
-            if (jb == null) jb = part.gameObject.AddComponent<JoltBody>();
+            var jb = part.gameObject.GetComponent<JoltPart>();
+            if (jb == null) jb = part.gameObject.AddComponent<JoltPart>();
             jb.Handle = handle;
             jb.Part = part;
             jb.OwnsBody = ownsBody;
@@ -136,13 +143,13 @@ namespace Longeron
             return jb;
         }
 
-        public static bool TryGet(uint bodyId, out JoltBody jb) =>
+        public static bool TryGet(uint bodyId, out JoltPart jb) =>
             _byHandle.TryGetValue(bodyId, out jb);
 
         // Public hook for sibling component-owners (QuadBody for PQS
-        // terrain quads, future SceneObjectBody for KSC static, etc.)
-        // that participate in the same per-tick BodyDestroy drain.
-        // Reusing the queue keeps a single drain site in
+        // terrain quads, StaticBody for KSC static colliders) that
+        // participate in the same per-tick BodyDestroy drain. Reusing
+        // the queue keeps a single drain site in
         // TopologyReconciler.Reconcile rather than scattering bridge
         // bookkeeping across resource owners.
         public static void EnqueuePendingDestroy(BodyHandle handle)
