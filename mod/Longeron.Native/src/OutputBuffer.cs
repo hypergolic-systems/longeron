@@ -18,6 +18,23 @@ namespace Longeron.Native
     }
 
     /// <summary>
+    /// Per-edge joint wrench, decomposed in the joint's reference
+    /// frame. Emitted every tick; the scene driver stashes these on
+    /// each part's <see cref="JoltBody"/> so a PartModule can read the
+    /// previous tick's values on its OnFixedUpdate to decide whether
+    /// to break.
+    /// </summary>
+    public struct JointWrenchRecord
+    {
+        public BodyHandle Body;       // vessel body
+        public ushort     PartIdx;    // tree index of the child part
+        public float      FAxial;     // signed: +compression, -tension
+        public float      FShear;     // magnitude
+        public float      TAxial;     // signed torsion
+        public float      TBending;   // magnitude
+    }
+
+    /// <summary>
     /// Per-vessel RNEA summary, decomposed in each joint's reference
     /// frame (Phase 4 advisory). Joint axis = parent CoM → child
     /// joint anchor in body-local. Compression = F·axis when positive;
@@ -134,6 +151,21 @@ namespace Longeron.Native
             record.AngX = *(float*)p;                  p += 4;
             record.AngY = *(float*)p;                  p += 4;
             record.AngZ = *(float*)p;                  p += 4;
+            _cursor += kPayload;
+        }
+
+        public void ReadJointWrench(out JointWrenchRecord record)
+        {
+            const int kPayload = 22;  // body_id(4) + part_idx(2) + 4 × float(4)
+            EnsureBytes(kPayload);
+            byte* p = _ptr + _cursor;
+            record = default;
+            record.Body     = new BodyHandle(*(uint*)p);   p += 4;
+            record.PartIdx  = *(ushort*)p;                 p += 2;
+            record.FAxial   = *(float*)p;                  p += 4;
+            record.FShear   = *(float*)p;                  p += 4;
+            record.TAxial   = *(float*)p;                  p += 4;
+            record.TBending = *(float*)p;                  p += 4;
             _cursor += kPayload;
         }
 

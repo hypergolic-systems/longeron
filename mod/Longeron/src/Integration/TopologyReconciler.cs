@@ -182,8 +182,10 @@ namespace Longeron.Integration
             // Send the vessel's spanning tree to the native RNEA pass
             // (Phase 4 advisory — logs per-edge transmitted wrench;
             // doesn't drive simulation). Built in topology order from
-            // the root walk so parent indices are always < child.
-            EmitVesselTree(v, newHandle, input);
+            // the root walk so parent indices are always < child. Also
+            // populates mv.PartsByIdx so SceneDriver can map incoming
+            // per-edge JointWrench records back to Parts.
+            EmitVesselTree(v, newHandle, input, mv);
 
             Debug.Log(LogPrefix + string.Format(
                 "{0} '{1}': {2} part(s), mass={3:F2}t, body={4}",
@@ -203,7 +205,8 @@ namespace Longeron.Integration
         static InputBuffer.VesselTreeNode[] _treeNodeScratch =
             new InputBuffer.VesselTreeNode[128];
 
-        static void EmitVesselTree(Vessel v, BodyHandle vesselBody, InputBuffer input)
+        static void EmitVesselTree(Vessel v, BodyHandle vesselBody, InputBuffer input,
+                                    ManagedVessel mv)
         {
             if (v == null || v.rootPart == null) return;
             var rootXform = v.rootPart.transform;
@@ -229,6 +232,13 @@ namespace Longeron.Integration
 
             int n = _bfsScratch.Count;
             if (n > 1024) n = 1024;  // matches kMaxPartsPerVessel native-side
+
+            // Snapshot BFS order onto the ManagedVessel so SceneDriver
+            // can resolve per-edge JointWrench records (which carry
+            // part_idx) back to a Part for stashing on JoltBody.
+            mv.PartsByIdx.Clear();
+            for (int i = 0; i < n; ++i) mv.PartsByIdx.Add(_bfsScratch[i]);
+
             if (_treeNodeScratch.Length < n)
             {
                 _treeNodeScratch = new InputBuffer.VesselTreeNode[

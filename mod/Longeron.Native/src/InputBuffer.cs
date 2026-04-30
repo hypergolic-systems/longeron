@@ -32,6 +32,7 @@ namespace Longeron.Native
         BodyPose          = 64,
         ContactReport     = 65,
         RneaSummary       = 66,
+        JointWrench       = 67,
     }
 
     /// <summary>

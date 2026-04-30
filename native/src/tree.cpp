@@ -157,34 +157,26 @@ bool TreeRegistry::RunAdvisoryPass(
     uint64_t step_count,
     float fixed_dt)
 {
+    mLastEdgeWrenches.clear();
     if (mTrees.empty()) return false;
 
-    // Rate-limit emission. KSP runs at 50 Hz; emit every ~1s = 50 steps.
-    // Per-tick math still runs (cheap relative to Jolt) — well, actually
-    // we currently only run when emitting; integrating per-tick to track
-    // peak transient stress is Phase 4.1.
-    bool should_emit = (step_count - mLastEmitStep) >= 50;
-    if (!should_emit) return false;
-    // Window between samples: number of ticks since the previous emit
-    // × fixed_dt. The finite-difference acceleration must use this
-    // window, not the per-tick fixed_dt — sampling once per ~50 ticks
-    // and dividing by 0.02 s would give a 50× overestimate. On the
-    // very first emit the window is the full step_count up to here.
-    const uint64_t prev_emit_step = mLastEmitStep;
-    const float window_dt = (step_count > prev_emit_step)
-        ? static_cast<float>(step_count - prev_emit_step) * fixed_dt
-        : fixed_dt;
-    mLastEmitStep = step_count;
-    mLastSummaries.clear();
+    // Per-edge wrenches go out every tick so PartModules see fresh
+    // joint stresses without 1-second cadence lag. The compact
+    // RneaSummary log is still throttled.
+    const bool emit_summary = (step_count - mLastEmitStep) >= 50;
+    if (emit_summary) {
+        mLastEmitStep = step_count;
+        mLastSummaries.clear();
+    }
 
-    // Track previous-tick velocity per body to estimate acceleration via
-    // finite difference. Persisting state across calls keeps Step()
-    // signature unchanged. Map keyed by body_id; lazily populated.
+    // Track previous-tick velocity per body to estimate per-tick
+    // acceleration via finite difference. Map keyed by body_id;
+    // updated every tick now that RNEA runs every tick.
     static std::unordered_map<uint32_t, JPH::Vec3> s_prev_lin_v;
     static std::unordered_map<uint32_t, JPH::Vec3> s_prev_ang_v;
 
     const JPH::BodyLockInterfaceNoLock& lock_iface = system.GetBodyLockInterfaceNoLock();
-    const float inv_dt = (window_dt > 1e-6f) ? (1.0f / window_dt) : 0.0f;
+    const float inv_dt = (fixed_dt > 1e-6f) ? (1.0f / fixed_dt) : 0.0f;
 
     for (auto& [body_id, tree] : mTrees) {
         auto it = registry.find(body_id);
@@ -219,18 +211,16 @@ bool TreeRegistry::RunAdvisoryPass(
             continue;
         }
 
-        // Per-part NET wrench: inertial requirement minus the average
-        // external wrench applied across the window. F_self[i] = m × a_part
-        // − F_ext_avg(i). Hooke's law for the joint: this is what the
-        // joints have to transmit to keep the part following the
-        // observed motion given the externals we know about. With
-        // gravity + thrust + drag all routed via Harmony into our
-        // per-part accumulator, F_self should approach zero on a
-        // cruising stable vessel and grow on a tumbling / impacting one.
-        const uint64_t window_ticks = (step_count > prev_emit_step)
-            ? (step_count - prev_emit_step) : 1;
-        const float inv_ticks = 1.0f / static_cast<float>(window_ticks);
-
+        // Per-part NET wrench this tick: inertial requirement minus the
+        // external wrench applied this tick. F_self[i] = m × a_part −
+        // F_ext(i). Hooke's law for the joint: this is what the joints
+        // have to transmit to keep the part following the observed
+        // motion given the externals we know about. With gravity +
+        // thrust + drag + contact reactions all routed into our
+        // per-part accumulator, F_self approaches zero on a cruising
+        // stable vessel and grows on a tumbling / impacting / loaded
+        // one. Per-tick (no window averaging) so PartModules see real
+        // peak forces during impacts and decoupler fires.
         std::vector<JPH::Vec3> F_self(tree.nodes.size(), JPH::Vec3::sZero());
         std::vector<JPH::Vec3> T_self(tree.nodes.size(), JPH::Vec3::sZero());
         for (size_t i = 0; i < tree.nodes.size(); ++i) {
@@ -238,13 +228,10 @@ bool TreeRegistry::RunAdvisoryPass(
             PartInertialWrench w = InertialWrench(
                 n.com_local, n.mass, n.inertia_diag,
                 v_body, omega, a_body, alpha);
-            // Average external wrench over the window:
-            JPH::Vec3 ext_F_avg = tree.ext_force[i]  * inv_ticks;
-            JPH::Vec3 ext_T_avg = tree.ext_torque[i] * inv_ticks;
-            F_self[i] = w.force  - ext_F_avg;
-            T_self[i] = w.torque - ext_T_avg;
+            F_self[i] = w.force  - tree.ext_force[i];
+            T_self[i] = w.torque - tree.ext_torque[i];
         }
-        // Drain accumulator for the next window.
+        // Drain accumulator for next tick.
         std::fill(tree.ext_force.begin(),  tree.ext_force.end(),  JPH::Vec3::sZero());
         std::fill(tree.ext_torque.begin(), tree.ext_torque.end(), JPH::Vec3::sZero());
 
@@ -315,6 +302,17 @@ bool TreeRegistry::RunAdvisoryPass(
             float t_torsion_abs = std::fabs(t_axial);
             float t_bending = t_perp.Length();
 
+                // Per-edge wrench record — emitted every tick so PartModules
+            // see fresh joint stress on the next FixedUpdate.
+            EdgeWrenchRecord ew;
+            ew.body_id   = body_id;
+            ew.part_idx  = i;
+            ew.f_axial   = f_axial;          // signed (+compression, -tension)
+            ew.f_shear   = f_shear;
+            ew.t_axial   = t_axial;          // signed torsion
+            ew.t_bending = t_bending;
+            mLastEdgeWrenches.push_back(ew);
+
             if (compression  > max_compression) { max_compression = compression;  max_compression_idx = i; }
             if (tension      > max_tension)     { max_tension     = tension;      max_tension_idx     = i; }
             if (f_shear      > max_shear)       { max_shear       = f_shear;      max_shear_idx       = i; }
@@ -322,24 +320,26 @@ bool TreeRegistry::RunAdvisoryPass(
             if (t_bending    > max_bending)     { max_bending     = t_bending;    max_bending_idx     = i; }
         }
 
-        RneaSummary s;
-        s.body_id            = body_id;
-        s.part_count         = static_cast<uint16_t>(tree.nodes.size());
-        s.max_compression    = max_compression;
-        s.max_compression_idx = max_compression_idx;
-        s.max_tension        = max_tension;
-        s.max_tension_idx    = max_tension_idx;
-        s.max_shear          = max_shear;
-        s.max_shear_idx      = max_shear_idx;
-        s.max_torsion        = max_torsion;
-        s.max_torsion_idx    = max_torsion_idx;
-        s.max_bending        = max_bending;
-        s.max_bending_idx    = max_bending_idx;
-        s.accel_mag          = a_body.Length();
-        s.alpha_mag          = alpha.Length();
-        mLastSummaries.push_back(s);
+        if (emit_summary) {
+            RneaSummary s;
+            s.body_id            = body_id;
+            s.part_count         = static_cast<uint16_t>(tree.nodes.size());
+            s.max_compression    = max_compression;
+            s.max_compression_idx = max_compression_idx;
+            s.max_tension        = max_tension;
+            s.max_tension_idx    = max_tension_idx;
+            s.max_shear          = max_shear;
+            s.max_shear_idx      = max_shear_idx;
+            s.max_torsion        = max_torsion;
+            s.max_torsion_idx    = max_torsion_idx;
+            s.max_bending        = max_bending;
+            s.max_bending_idx    = max_bending_idx;
+            s.accel_mag          = a_body.Length();
+            s.alpha_mag          = alpha.Length();
+            mLastSummaries.push_back(s);
+        }
     }
-    return true;
+    return emit_summary;
 }
 
 } // namespace longeron

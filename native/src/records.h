@@ -69,6 +69,15 @@ enum class RecordType : uint8_t {
                              //   shear. T_subtree gives torsion / bending the same way. Only
                              //   tension + shear + torsion + bending are candidates for
                              //   joint.breakForce / breakTorque comparison; compression is benign.
+                             //   Emitted at ~1 Hz cadence for log smoothing.
+    JointWrench       = 67,  // u32 vessel_body_id, u16 part_idx,
+                             //   float f_axial (signed: +compression, -tension),
+                             //   float f_shear (magnitude),
+                             //   float t_axial (signed torsion),
+                             //   float t_bending (magnitude)
+                             //   Per-edge wrench in joint reference frame. Emitted every tick;
+                             //   C# stashes on JoltBody so PartModules can read on the next
+                             //   tick's OnFixedUpdate to make break decisions.
 };
 
 // Phase 4: cap on parts per vessel for the RNEA pass. Stock KSP allows

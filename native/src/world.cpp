@@ -966,7 +966,30 @@ int32_t LongeronWorld::Step(
     //    difference, computes per-edge transmitted wrench, emits a
     //    per-vessel RneaSummary record at ~1 Hz. Phase 4.0 — no
     //    influence on simulation.
-    if (mTreeRegistry.RunAdvisoryPass(mPhysicsSystem, mBodyRegistry, mStepCount, dt)) {
+    const bool summary_ready = mTreeRegistry.RunAdvisoryPass(
+        mPhysicsSystem, mBodyRegistry, mStepCount, dt);
+
+    // Per-edge wrench records — emitted every tick so PartModules see
+    // fresh joint stress on the next FixedUpdate. 23 bytes per edge:
+    //   tag(1) + body_id(4) + part_idx(2)
+    //   + f_axial(4) + f_shear(4) + t_axial(4) + t_bending(4).
+    {
+        constexpr size_t kSize = 23;
+        for (const auto& w : mTreeRegistry.GetLastEdgeWrenches()) {
+            if (!ReserveOutput(kSize)) break;
+            uint8_t* p = mOutputBuffer + mOutputLen;
+            *p = static_cast<uint8_t>(RecordType::JointWrench); p += 1;
+            Write(p, w.body_id);
+            Write(p, w.part_idx);
+            Write(p, w.f_axial);
+            Write(p, w.f_shear);
+            Write(p, w.t_axial);
+            Write(p, w.t_bending);
+            mOutputLen += kSize;
+        }
+    }
+
+    if (summary_ready) {
         // 45 bytes per summary: tag(1) + body_id(4) + part_count(2)
         //   + 5 × {value(4) + idx(2)} for compression / tension /
         //   shear / torsion / bending = 30

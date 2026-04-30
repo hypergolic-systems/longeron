@@ -96,6 +96,20 @@ struct RneaSummary {
     float    alpha_mag;   // |α_body| this tick
 };
 
+// Per-edge wrench decomposition emitted every tick. PartModules read
+// these (via JoltBody) on the next tick's OnFixedUpdate to decide
+// whether to break. f_axial is signed: +compression / -tension.
+// t_axial is signed (torsion direction). f_shear and t_bending are
+// magnitudes (unsigned).
+struct EdgeWrenchRecord {
+    uint32_t body_id;
+    uint16_t part_idx;
+    float    f_axial;
+    float    f_shear;
+    float    t_axial;
+    float    t_bending;
+};
+
 class TreeRegistry {
 public:
     // Replace (or insert) the tree for a given vessel. Called from the
@@ -129,31 +143,34 @@ public:
         JPH::Vec3 force_world, JPH::RVec3 point_world,
         JPH::RVec3 body_com_world, JPH::Quat body_rot);
 
-    // Run RNEA for every tree using current Jolt state. Fills the
-    // mLastSummaries vector with one entry per vessel (only when the
-    // emit cadence ticks). Caller (world.cpp) drains into the output
-    // record stream as RneaSummary records. Called once per Step after
-    // PhysicsSystem::Update.
+    // Run RNEA for every tree using current Jolt state. Always computes
+    // per-edge wrench decomposition (mLastEdgeWrenches) so PartModules
+    // can read fresh joint forces every tick. The compact RneaSummary
+    // (mLastSummaries) is still gated by an emit cadence so the diag
+    // log doesn't drown KSP.log.
     //
-    // Returns true if a new round of summaries was just produced (the
-    // emit cadence hit this tick); false if the pass was skipped this
-    // tick.
+    // Returns true if a new RneaSummary was produced this tick; false
+    // if it was skipped (per-edge data was still computed). Called once
+    // per Step after PhysicsSystem::Update + ResolveContacts.
     bool RunAdvisoryPass(const JPH::PhysicsSystem& system,
                          const std::unordered_map<uint32_t, JPH::BodyID>& registry,
                          uint64_t step_count, float fixed_dt);
 
     const std::vector<RneaSummary>& GetLastSummaries() const { return mLastSummaries; }
+    const std::vector<EdgeWrenchRecord>& GetLastEdgeWrenches() const { return mLastEdgeWrenches; }
 
 private:
     std::unordered_map<uint32_t, VesselTree> mTrees;
 
-    // Latest pass output, refilled in RunAdvisoryPass. Cleared at the
-    // start of each emit tick so stale entries from a previous emit
-    // don't leak into the output stream.
-    std::vector<RneaSummary> mLastSummaries;
+    // Latest pass output. mLastEdgeWrenches is refilled every tick
+    // (PartModules need fresh data); mLastSummaries is refilled only
+    // on cadence ticks (1 Hz log smoothing). Both vectors are cleared
+    // at the start of each respective fill.
+    std::vector<RneaSummary>        mLastSummaries;
+    std::vector<EdgeWrenchRecord>   mLastEdgeWrenches;
 
-    // Last step at which we ran the advisory pass. Throttle to keep
-    // KSP.log readable while still giving the C# side a regular signal.
+    // Last step at which we emitted a summary. Throttle to keep
+    // KSP.log readable while per-edge wrenches still flow every tick.
     uint64_t mLastEmitStep = 0;
 };
 

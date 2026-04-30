@@ -35,6 +35,15 @@ namespace Longeron.Integration
         public Dictionary<Part, PartOffset> PartOffsets { get; }
             = new Dictionary<Part, PartOffset>();
 
+        // BFS-order part list (parallel to the native side's vessel
+        // tree indices). PartsByIdx[i] is the Part at tree index i.
+        // Populated by TopologyReconciler.EmitVesselTree alongside
+        // the VesselTreeUpdate record. Used by SceneDriver to map
+        // incoming JointWrench records back to a Part for stashing
+        // on its JoltBody.
+        public List<Part> PartsByIdx { get; }
+            = new List<Part>();
+
         // Last-seen part list, used to detect topology changes that
         // require a rebuild (decouple, dock, joint break, fairing
         // eject, structural failure).

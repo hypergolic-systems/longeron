@@ -65,6 +65,36 @@ namespace Longeron
         // tree doesn't track, e.g. a vessel without a sent tree).
         public ushort PartIdx = 0xFFFF;
 
+        // Phase 4 joint wrench in the joint's own reference frame
+        // (vessel-body-local axes, axial direction = parent-CoM →
+        // child-attach). Refreshed every tick by SceneDriver from
+        // native JointWrench records. PartModules read these on the
+        // next tick's OnFixedUpdate to decide whether to break.
+        //
+        // f_axial: signed scalar — positive = compression (squeeze;
+        //   benign), negative = tension (pull-apart; what shears bolts).
+        // f_shear: magnitude of the perpendicular-to-axis force.
+        // t_axial: signed torsion (twist about the joint axis).
+        // t_bending: magnitude of the perpendicular-to-axis torque
+        //   (e.g. radial decoupler holding a heavy booster).
+        //
+        // KSP convention: forces in kN, torques in kN·m.
+        public float LastJointFAxial;     // signed
+        public float LastJointFShear;     // ≥ 0
+        public float LastJointTAxial;     // signed
+        public float LastJointTBending;   // ≥ 0
+
+        /// <summary>Compressive (≥ 0) component of the joint axial force.
+        /// 0 if the joint is in tension. Doesn't break joints.</summary>
+        public float LastJointCompression =>
+            LastJointFAxial > 0f ? LastJointFAxial : 0f;
+
+        /// <summary>Tensile (≥ 0) component of the joint axial force.
+        /// 0 if the joint is in compression. Compare against
+        /// joint.breakForce together with shear.</summary>
+        public float LastJointTension =>
+            LastJointFAxial < 0f ? -LastJointFAxial : 0f;
+
         // Pending body destroys from GameObjects Unity has destroyed
         // since the last drain. Static so the queue survives even when
         // a JoltBody's component is gone — the queue is keyed by

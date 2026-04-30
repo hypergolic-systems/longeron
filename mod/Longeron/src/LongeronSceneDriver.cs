@@ -117,6 +117,28 @@ namespace Longeron
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out _);
                         break;
+                    case RecordType.JointWrench:
+                        world.Output.ReadJointWrench(out var jw);
+                        if (JoltBody.TryGet(jw.Body.Id, out var jwOwner)
+                            && jwOwner.Part != null
+                            && jwOwner.Part.vessel != null
+                            && SceneRegistry.TryGet(jwOwner.Part.vessel, out var jwMv)
+                            && jw.PartIdx < jwMv.PartsByIdx.Count)
+                        {
+                            var jwPart = jwMv.PartsByIdx[jw.PartIdx];
+                            if (jwPart != null && jwPart.gameObject != null)
+                            {
+                                var jb = jwPart.gameObject.GetComponent<JoltBody>();
+                                if (jb != null)
+                                {
+                                    jb.LastJointFAxial   = jw.FAxial;
+                                    jb.LastJointFShear   = jw.FShear;
+                                    jb.LastJointTAxial   = jw.TAxial;
+                                    jb.LastJointTBending = jw.TBending;
+                                }
+                            }
+                        }
+                        break;
                     case RecordType.RneaSummary:
                         world.Output.ReadRneaSummary(out var rnea);
                         if (JoltBody.TryGet(rnea.Body.Id, out var rneaOwner)
