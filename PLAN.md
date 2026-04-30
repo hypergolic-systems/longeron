@@ -1,522 +1,375 @@
-# Longeron — Jolt pivot plan
-
-## Status (2026-04-27)
-
-| Phase | State | Notes |
-|---|---|---|
-| 0 — native foundation | ✅ done | C++ bridge + Jolt v5.5.0 submodule + `Longeron.Native` C# wrapper. Builds on macOS arm64 universal; Win64/Linux untested but CMake config is platform-portable. |
-| 1 — first light (out-of-game) | ✅ done | 12 probe checks green via `just native-probe`. **Load-bearing finding:** kinematic-vs-static / kinematic-vs-kinematic contact callbacks require `BodyCreationSettings.mCollideKinematicVsNonDynamic = true` on every body. Default is false — silently skips contact dispatch otherwise. Documented in project memory. |
-| 1.5 — in-game smoke test | ✅ done | Native bridge loads in KSP via Mono; flight-scene world lifecycle works; one-part vessel managed with **real collider mirroring** (BoxCollider / SphereCollider / convex MeshCollider via `ConvexHullShape`); synthetic 50×0.5×50 m static ground anchored under the lowest part; kinematic-vs-static contact callbacks fire every tick on `SmokeTest` craft. `OrbitDriver.TrackRigidbody` kinematic-rb bypass restored to fix navball / wind-sound flicker. |
-| 2 — multi-part with Jolt joints | ⏳ next | `Rigidbody.AddForce*` redirect, mass updates, pose readback (Jolt → Unity rb), Krakensbane offset tracking, `SixDOFConstraint` for stack/surface attach, capsule colliders. |
-| 2.5 — scene lifecycle | ⏳ | pack/unpack, vessel switch, save/load, scene transitions. |
-| 3 — terrain | ⏳ | KSC static env, PQS streaming, LOD, asteroids/water. |
-| 3.5 — wheels | ⏳ | Custom raycast suspension on Jolt bodies. |
-| 4 — Featherstone | ⏳ | Replaces Jolt joints with ABA. First public release. |
-
-Latest commits on `main` for this work: `c4e7464` (compliance reframe) → `6fe43ef` (pivot docs) → `6db9815` (Phase 0 scaffold) → `706cd92` (Phase 1 contact verification) → `83c44ed` (strip pre-pivot integration) → `7775eea` (variable-length BodyCreate) → `cfbfcf8` (Phase 1.5 KSP integration) → `8f45708` (OrbitDriver kinematic bypass).
+# Phase 5.1.2 — Canonical Featherstone ABA, test-driven
 
 ## Context
 
-The current architecture (Featherstone ABA in C# + Unity-PhysX for collision)
-has been explored on two branches and hit the same structural wall from
-opposite sides:
+Phase 5.1 v1 shipped a tree-coupled flex integrator that the code
+honestly calls "ABA-style" but is actually **per-link Newton-Euler in
+vessel frame + per-substep XPBD-style anchor projection**. It has the
+right structural shape (no PGS, anchors rigidly pinned, angular spring
+at joint) but the wrong *state representation*: each link's rotation
+is stored in vessel frame (`PartFlex.delta_rot`) and the joint angle
+is derived as `q_joint = parent.Conj() × child` each substep.
 
-- **`main`** — kinematic Unity rigidbodies. Clean integration ownership, but
-  PhysX does not generate contact reports for kinematic bodies against static
-  geometry (and the kinematic-vs-static contact callbacks we did get
-  required a load-bearing `RigidbodyConstraints.FreezeAll` toggle around every
-  per-tick `rb.position` write to stop PhysX silently reverting our writes).
-  Sub-mm rotation drift, joint slop under contact — residue of two
-  integrators sharing one rigidbody.
-- **`non-kinematic`** — PhysX integrates rbs, Longeron provides corrective
-  wrenches via `AddForce`. To compute a correct residual `m·a − fExt`, ABA
-  has to *predict* what PhysX's contact solver is about to apply; that means
-  re-implementing a contact penalty model in our solver to chase PhysX's
-  contact solver. Two contact solvers, neither authoritative. The PLAN.md on
-  that branch documents the dead end.
+The consequence is that **rigid rotations of the parent are not
+kinematically propagated to the child** — child's vessel-frame
+rotation is a free integrand whose only coupling to the parent is
+the angular spring. When SAS / gimbal commands cause the vessel to
+rotate, parent and child rotate at different rates within a substep,
+the spring fires to drag the child along, and you get a phase-lag
+oscillation that the spring + damper can't remove because the spring
+itself is what's creating the lag.
 
-Both branches confirm the same diagnosis: **Unity will not let us share the
-rigidbody state cleanly with PhysX.** Either Unity owns integration (and we
-fight position writes), or Unity owns contacts (and we run a worse contact
-solver to stay in sync). There is no middle ground inside Unity's physics
-ownership model.
+Ground-truth symptom (in-game test, 2026-04-30): a stack rocket
+with central engine and side tanks is stable under axial loads but
+gimbaling and SAS torque produce oscillatory engine-position
+displacement and uncontrolled vessel roll. The screenshot shows the
+engine separated from its parent by a visible gap — not "anchor
+constraint slipping" (anchors *are* pinned each substep) but
+extreme angular flex during oscillation, displacing the engine CoM
+from its rest position.
 
-This plan pivots to Jolt for **all of broadphase, contact detection,
-contact solving, and integration**. Unity rigidbodies become kinematic
-proxies driven by Jolt's output for the benefit of stock + modded code that
-reads `rb.velocity`, `rb.position`, etc. PhysX simulation is effectively
-disabled for parts (gravity off, all joints removed, kinematic flag set).
+This plan replaces the v1 forward step with **canonical reduced-coord
+Featherstone ABA** per Featherstone *Rigid Body Dynamics Algorithms*
+Ch. 7. The state representation flips: joint state is per-edge
+(`q_joint`, `ω_joint`) and the child's vessel-frame rotation is
+*derived* by composition with the parent. Rigid rotations of the
+parent propagate kinematically; the spring fires only on actual
+relative deformation.
 
-Featherstone is preserved as the long-term solver target but **layered on
-top of Jolt**, not in place of it. Initial phases use Jolt's native
-SixDOFConstraint with stiff spring/damper drives; Phase 4 replaces those
-internal joint forces with an ABA pass that writes per-part poses to Jolt
-each tick. Loop closures collapse out of the math because every joint is
-6-DOF compliant — non-tree graph edges become additional compliant joints
-contributing force pairs from kinematic state, not constraints needing KKT
-projection.
+## Working principle (unchanged from prior plan)
 
-## Architecture summary
-
-Per-vessel design:
-
-- **Many Jolt bodies per vessel.** One kinematic `JPH::Body` per `Part`,
-  collision shape derived from the part's existing colliders. No
-  `MutableCompoundShape` (sub-shape transforms would dirty every tick once
-  any joint flexes). Self-collision filtered via `ObjectLayer` /
-  `GroupFilter` keyed on vessel ID.
-- **Joints internal to a vessel** — Phase 2: Jolt `SixDOFConstraint` with
-  stiffness/damping matching stock's `ConfigurableJoint`. Phase 4: ABA
-  computes joint forces, writes per-body poses; Jolt only sees rigid
-  per-tick pose updates with no inter-body constraints. The "joint type
-  collapse" — `Fixed` / `Revolute` / `Prismatic` / `Free6` all become one
-  `Compliant6DOF` primitive parameterized by per-axis K/C/motor — happens
-  at Phase 4.
-- **Inter-vessel coupling** (docking, KAS strut between vessels) — Phase 2:
-  Jolt constraint between bodies. Phase 4: ABA tree edge between bodies.
-  Topology events become pure ABA-tree mutations; Jolt body counts don't
-  change on docking/undocking.
-
-Owner split (vs. current `CLAUDE.md`):
-
-| Concern | Owner |
+| Layer | Owner |
 |---|---|
-| Part poses (source of truth) | **Jolt** (ABA writes to Jolt in Phase 4) |
-| Inter-part forces / constraints | Jolt (Phase 2) → ABA (Phase 4) |
-| Numerical integration | **Jolt** |
-| External wrench aggregation | C# accumulator → Jolt `AddForce` per tick |
-| Collider geometry + broadphase | **Jolt** (mirror of Unity collider data) |
-| Static-world contact detection | **Jolt** |
-| Inter-vessel contact detection | **Jolt** |
-| Terrain geometry | Unity PQS → mirrored to Jolt static `MeshShape`s |
-| Unity rigidbodies | Kinematic proxies, pose-driven from Jolt |
-
-## Boundary design — minimum P/Invoke surface
-
-Goal: **one P/Invoke per `FixedUpdate` direction.** No per-event, per-body,
-per-force boundary crossings.
-
-C# side, per `FixedUpdate`:
-
-1. **Accumulate inputs** in a pinned, blittable input buffer:
-   - Per-body force/torque deltas (sum of all `AddForce*` / `AddTorque`
-     calls intercepted via Harmony since last tick)
-   - Per-body kinematic velocity targets (Phase 4: ABA's predicted velocity)
-   - Mass/inertia updates (one record per body whose mass changed)
-   - Topology mutations (body create/destroy, constraint create/destroy,
-     shape update) — queued by Harmony patches on `Part.Couple`,
-     `Part.decouple`, `PartJoint.DestroyJoint`, `ModuleDockingNode` events
-   - Step `dt`, scene-level config (gravity vector at vessel COM, etc.)
-2. **Single call**: `longeron_step(input_ptr, input_len, output_ptr, output_cap, &output_len)`.
-3. **Read outputs** from pinned output buffer:
-   - Per-body pose (position double3 if `JPH_DOUBLE_PRECISION`,
-     orientation float4)
-   - Per-body linear/angular velocity
-   - Per-pair contact records (body A, body B, point, normal, depth,
-     impulse) — fed back to ABA as external wrenches in Phase 4
-4. **Write Unity transforms** from output. Kinematic Unity rb gets
-   `rb.position` / `rb.rotation` / `rb.velocity` set so stock and modded
-   code see consistent state.
-
-Buffer schemas are typed records with version prefix; native bridge
-parses streams of records rather than fixed-layout arrays. Allows additive
-schema evolution without breaking either side.
-
-Marshalling discipline:
-
-- Blittable structs only.
-- Buffers pinned via `GCHandle.Alloc(GCHandleType.Pinned)` once at session
-  start, reused every frame. No per-tick allocations.
-- All native API uses `unsafe` C# with `byte*` and explicit offsets.
-- No `string` marshalling; all identifiers are integer body IDs.
-- `[SuppressUnmanagedCodeSecurity]` on the P/Invoke decl to skip the
-  full security stack walk.
-
-## Native bridge — language and shape
-
-**C++** for the bridge (Jolt is C++; one FFI boundary; no Rust↔C++ binding
-generator + Rust↔C ABI to manage).
-
-`JoltPhysicsSharp` is **not viable** — targets net9.0/net10.0 only, no
-net48 or netstandard2.0 fallback, will not load under KSP's bundled Mono.
-Confirmed via NuGet/repository inspection (2026-04-27).
-
-C ABI surface:
-
-```c
-// session lifetime
-LongeronWorld* longeron_world_create(const LongeronConfig* cfg);
-void longeron_world_destroy(LongeronWorld* w);
-
-// per-tick
-void longeron_step(LongeronWorld* w,
-                   const uint8_t* input, size_t input_len,
-                   uint8_t* output, size_t output_cap, size_t* output_len,
-                   float dt);
-
-// debug
-const char* longeron_version(void);
-void longeron_set_debug_renderer(LongeronWorld* w, ...);
-```
-
-Implementation files:
-
-```
-native/
-  CMakeLists.txt
-  third_party/
-    JoltPhysics/                 # git submodule, pinned to a release tag
-  src/
-    bridge.h                     # C ABI declarations
-    bridge.cpp                   # C ABI → world dispatch
-    world.cpp / world.h          # LongeronWorld: Jolt PhysicsSystem,
-                                 #   body registry, contact listener,
-                                 #   per-vessel ObjectLayer assignments
-    input_buffer.cpp/.h          # decoder for the C# input stream
-    output_buffer.cpp/.h         # encoder for the output stream
-    contact_listener.cpp/.h      # JPH::ContactListener impl, accumulates
-                                 #   contact records into the output stream
-```
-
-Build: CMake produces a single shared library
-(`longeron_native.{dll,dylib,so}`) plus a copy of the Jolt static lib
-embedded. Jolt built with `JPH_DOUBLE_PRECISION=ON` to eliminate
-Krakensbane synchronization concerns on the physics side. Krakensbane
-keeps shifting the Unity rendering origin — kinematic Unity rb pose
-writes apply the offset on the C# side after reading from Jolt.
-
-Cross-platform shipping (Phase 0):
-
-- Win64 — `longeron_native.dll`
-- macOS — `longeron_native.dylib`, universal binary (`x86_64;arm64`)
-- Linux x64 — `longeron_native.so`
-
-Local dev: build for the host platform only via CMake. Release: a
-build matrix (GitHub Actions or just three local builds) producing all
-three artifacts to bundle into `release/Longeron.zip`.
-
-## Phasing
-
-### Phase 0 — native foundation
-**Goal:** Jolt builds, C++ bridge loads from C#, single round-trip
-P/Invoke works.
-
-- Add `native/` directory, CMakeLists, Jolt submodule pinned to a release
-  tag, `JPH_DOUBLE_PRECISION=ON`.
-- Implement `longeron_version()` and a no-op `longeron_step()` that just
-  echoes input length.
-- New C# project: `mod/Longeron.Native/` — P/Invoke bindings,
-  pinned-buffer helpers, schema serialization.
-- `justfile`: add `native-build`, `native-clean`, integrate into `dist`
-  (copy native lib into `GameData/Longeron/Plugins/`).
-- Verify: `Longeron.Native.dll` calls `longeron_version()` from KSP and
-  prints to log. Round-trip a 1KB buffer with no real physics; confirm
-  no marshalling allocations under `Profiler.GetMonoUsedSizeLong()`.
-
-### Phase 1 — first light
-**Goal:** one part, kinematic Unity rb, sitting on a static plane,
-gravity applied per tick, contacts firing.
-
-- Single-body world: one Jolt body for one part, plane Jolt body for the
-  pad (no real terrain yet).
-- Disable Jolt's gravity (`SetGravity(Vec3::sZero())`); apply gravity per
-  body per tick from C# (`vessel.precalc.integrationAccel * mass`).
-- Wire up `JPH::ContactListener::OnContactPersisted` → output buffer.
-- **Verify the load-bearing assumption:** kinematic-vs-static and
-  kinematic-vs-kinematic contact callbacks fire reliably under Jolt.
-  This is the single biggest "if it doesn't work, we redesign" risk;
-  catching it on Day 1 of Phase 1 is the entire point.
-- Wire up Jolt's debug renderer (line/triangle output → Unity LineRenderer
-  or `Debug.DrawLine`).
-- Establish per-tick performance baseline: one body, one contact, full
-  round-trip should be sub-100µs. If not, the bridge has a bug.
-
-### Phase 2 — multi-part with Jolt joints
-**Goal:** rocket flies. Multi-part vessel, stock force-producers work,
-mass updates apply, vessel is flyable to orbit.
-
-- One kinematic Jolt body per part. Vessel-scoped `ObjectLayer`
-  prevents same-vessel self-collision.
-- `JPH::SixDOFConstraint` between adjacent parts:
-  - Stack/surface attach: stiff K, stiff C, all axes
-  - BG hinges/pistons: stiff K on 5 axes, motor on the free axis
-  - Pre-lock docking: free all 6 with light damping
-  - Inter-vessel docking/KAS: Jolt constraint between separate vessel
-    bodies (cross-`ObjectLayer` constraint allowed)
-- Force redirect: Harmony prefix on `Rigidbody.AddForce*`,
-  `Rigidbody.AddTorque*`, `Rigidbody.AddRelativeForce*`,
-  `Rigidbody.AddForceAtPosition` (and `Rigidbody.AddExplosionForce` if
-  used). Each call accumulates into a per-body force/torque scratch
-  buffer; original method is replaced (Unity rb is kinematic, original
-  is a no-op anyway). FlightIntegrator's gravity goes through the same
-  redirect — no special case.
-- Mass updates: hook the post-mass-change event (e.g., per `ModuleEngines`
-  fuel burn). Per-body mass/inertia delta record in the input buffer.
-- Krakensbane: kinematic rb pose write subtracts the current Krakensbane
-  offset before assigning to `rb.position`. Native Jolt world stays in
-  absolute double-precision space.
-
-### Phase 2.5 — scene lifecycle
-**Goal:** flying multiple missions, switching vessels, save/load all
-work without state drift or memory leaks.
-
-- `GameEvents.onVesselGoOnRails` / `GoOffRails` — destroy/create Jolt
-  bodies for the affected vessel.
-- `GameEvents.onVesselSwitching` / `onVesselWasModified` — verify
-  state consistency; this is where most "world out of sync" bugs will
-  live.
-- Scene transitions (`onLevelWasLoaded`) — tear down `LongeronWorld`,
-  rebuild on flight scene entry.
-- Save/load — Jolt state is *derived* (not persisted); rebuild from KSP
-  state on `onVesselGoOffRails`.
-
-### Phase 3 — terrain
-**Goal:** vessels rest on / drive on real terrain, not a plane.
-
-Sub-decompose:
-
-- **3a:** Static environment (KSC buildings, runway, launchpad mesh,
-  hangar floor, water plane). One-shot mirror at scene load — enumerate
-  Unity colliders, create Jolt static bodies. Tear down on scene exit.
-- **3b:** PQS quad collider streaming. Hook PQS's collider quad
-  spawn/despawn — verify the exact event names via the `ksp-reference`
-  skill before committing. Each quad → one Jolt static `MeshShape` body,
-  added/removed as PQS streams. This is the mechanically biggest part of
-  Phase 3.
-- **3c:** LOD swaps. PQS swaps colliders at LOD boundaries; treat as
-  remove-old + add-new in Jolt with no special transitional state.
-- **3d:** Asteroids/comets (procedural mesh per body) and water surface
-  collider (planar). Asteroid collider streams in via stock; mirror the
-  same way as PQS quads but per-body, not per-quad.
-
-### Phase 3.5 — wheels
-**Goal:** wheels work. Specifically: rovers drive on terrain without
-falling over, landing gear absorbs touchdown impulses.
-
-Wheels currently use Unity's `WheelCollider` (PhysX raycast suspension).
-Two paths:
-
-- Use Jolt's `VehicleConstraint` — built for cars, may not match KSP's
-  wheel module API (`ModuleWheelBase` etc.) cleanly.
-- Implement custom raycast suspension on Jolt bodies — more code but
-  controllable and matches the stock `ModuleWheelBase` API surface.
-
-Recommend the latter. Stock KSP wheels are a known pain point; rewriting
-them on Jolt is an opportunity, not a cost.
-
-### Phase 4 — Featherstone replaces Jolt's joints
-**Goal:** wobble-free target hit. First public release.
-
-- Joints internal to a vessel are removed from Jolt.
-- ABA runs each tick over the vessel's spanning tree:
-  - All joints become one `Compliant6DOF` primitive with per-axis K/C
-  - Cycle-closing graph edges (docking rings, KAS struts forming cycles)
-    become additional compliant joint forces, *not* KKT constraints
-  - No Lagrange multipliers, no constraint stabilization
-  - Stiff joints → implicit ABA integration (Featherstone Ch. 9
-    spring-damper joint formulation) for unconditional stability
-- ABA writes per-part kinematic velocities to Jolt each tick (Jolt
-  integrates kinematic motion, applies pose to broadphase).
-- Jolt's contact listener still feeds external contact wrenches into
-  ABA's per-body fExt.
-- Existing `mod/Longeron.Physics/` (ABA, RNEA, spatial vector library)
-  is the implementation foundation here; preserved through Phases 0-3.
-
-### Phase 5+ — secondary work
-- BG robotics — servo/piston driver code, motor force/torque parameters
-  fed to ABA per the unified primitive.
-- KAS/KIS — patches to mirror their `ConfigurableJoint` creation into
-  Longeron joint records.
-- Determinism + multi-vessel parallel simulation.
-- Profiling pass — likely the bridge call frequency, not Jolt itself.
-
-## Repo layout changes
-
-Additions:
-
-```
-native/                                # NEW
-  CMakeLists.txt
-  third_party/
-    JoltPhysics/                       # git submodule
-  src/
-    bridge.h, bridge.cpp
-    world.h, world.cpp
-    input_buffer.{h,cpp}
-    output_buffer.{h,cpp}
-    contact_listener.{h,cpp}
-
-mod/Longeron.Native/                   # NEW
-  Longeron.Native.csproj               # net48
-  src/
-    NativeBridge.cs                    # extern "C" P/Invoke
-    InputBuffer.cs                     # writer
-    OutputBuffer.cs                    # reader
-    BodyHandle.cs                      # opaque integer body ID
-    World.cs                           # session-level lifetime
-
-justfile                               # MODIFY: + native-build / dist integration
-.gitmodules                            # NEW
-```
-
-Existing code:
-
-- `mod/Longeron.Physics/` — **kept**. The ABA / RNEA / spatial library
-  is the Phase 4 target. Phases 0-3 don't reference it.
-- `mod/Longeron/` — gradually migrates: `LongeronSceneDriver`'s wrench
-  computation paths get reworked to feed `Longeron.Native` instead of
-  `Longeron.Physics` directly. Force-redirect Harmony patches added.
-  `LongeronVesselModule` lifecycle hooks added for body create/destroy.
-  Existing `Patches/PartCollisionRelay.cs` becomes obsolete (Jolt
-  reports contacts) but is kept until Phase 1 verifies Jolt callbacks
-  fire as expected.
-
-## Documentation updates (CLAUDE.md, README.md)
-
-Both need rewrites for self-consistency. Plan: do them as part of Phase 0
-work, before code lands, so the docs match the design from day one.
-
-### `README.md` changes
-
-- "Approach" section — rewrite. The current text sells "PhysX's existing
-  collider geometry and broadphase" as an explicit ownership boundary;
-  that's no longer the design. New text: Jolt owns broadphase, contacts,
-  and integration; Featherstone is the joint-force model layered on top.
-- The four-bullet joint list (`Compliant 6-DOF`, `Revolute / Prismatic`,
-  `Free 6-DOF`, `Fixed`) — collapse to a single `Compliant 6-DOF`
-  primitive with per-axis stiffness/damping, with a note that revolute /
-  prismatic / free / fixed are parameter choices, not separate types.
-- Add a paragraph on Jolt: why a separate physics engine instead of
-  PhysX, and what the boundary looks like.
-
-### `CLAUDE.md` changes
-
-- "Architecture / Ownership split" table — rewrite to match the new
-  ownership table above.
-- "Solver (Longeron.Physics)" section — reframe as "the Phase 4 target,"
-  not "the current design." Add a new "Native bridge (Longeron.Native /
-  native/)" section describing the C++ bridge, buffer protocol, P/Invoke
-  surface.
-- "KSPBurst / HPC# integration" section — keep but mark as "applies to
-  `Longeron.Physics` (Phase 4)." The native bridge does not use Burst.
-- "PartJoint strategy" section — rewrite. The current "neuter / transpile
-  / delete" ladder doesn't apply because Jolt replaces PhysX entirely.
-  New strategy: kill `PartJoint` creation outright (Phase 2), since Unity
-  rbs are kinematic and PhysX joints would be no-ops anyway. Stock code
-  paths that read `Part.attachJoint` get a stub `PartJoint` that satisfies
-  null checks; calls into the joint object are no-ops or redirected.
-- "Topology lifecycle" table — keep, but add column for "Jolt action"
-  alongside the existing "Longeron action."
-- "Loop closures on split" subsection — note that with all-6-DOF
-  compliant joints, loop closures are no longer special; non-tree edges
-  are just additional compliant force terms with no KKT machinery
-  needed.
-- "Struts are mostly obsolete" — update to acknowledge that with the
-  Jolt design, struts and KAS struts are just additional `Compliant6DOF`
-  records in the vessel graph.
-- "Open questions" — replace items 1, 2 (PhysX-specific) with new
-  Jolt-specific questions: Jolt kinematic contact callback semantics
-  (Phase 1 verification), Jolt determinism flag, Jolt mass-update
-  thread-safety, etc.
-- "Project layout" — add `native/` and `mod/Longeron.Native/`; move
-  `mod/Longeron.Physics/` description under the Phase 4 heading.
-- "Build & install" — add `just native-build`.
-
-## Critical files
-
-Files this plan creates or substantially modifies:
-
-- `native/CMakeLists.txt` — NEW
-- `native/src/bridge.{h,cpp}` — NEW
-- `native/src/world.{h,cpp}` — NEW
-- `mod/Longeron.Native/Longeron.Native.csproj` — NEW
-- `mod/Longeron.Native/src/NativeBridge.cs` — NEW
-- `mod/Longeron.Native/src/{Input,Output}Buffer.cs` — NEW
-- `mod/Longeron/src/LongeronSceneDriver.cs` — MODIFY: feed
-  `Longeron.Native` instead of running ABA directly (Phases 0-3)
-- `mod/Longeron/src/LongeronVesselModule.cs` — MODIFY: per-vessel Jolt
-  body lifecycle on `GoOffRails`/`GoOnRails`
-- `mod/Longeron/src/Patches/PartForceHooks.cs` — MODIFY: redirect to
-  per-body force accumulator instead of (or in addition to) the current
-  passthrough
-- `mod/Longeron/src/Patches/PartCollisionRelay.cs` — DELETE eventually
-  (Phase 1+)
-- `mod/Longeron.Physics/` — UNTOUCHED through Phases 0-3; Phase 4 target
-- `justfile` — MODIFY: native build steps
-- `README.md` — MODIFY: Approach + joint list rewrites
-- `CLAUDE.md` — MODIFY: substantial rewrite per above
-- `.gitmodules` — NEW: pin Jolt to a release tag
-
-## Verification
-
-Per-phase end-to-end tests. Each phase ships only when the prior verifies.
-
-**Phase 0:**
-- `just native-build` produces `longeron_native.{dll,dylib,so}` on host
-  platform with no warnings.
-- KSP loads the mod; `[Longeron] native bridge version: <X>` appears in
-  the log.
-- Round-trip a buffer of N records; verify no mono allocations under
-  `Profiler.GetMonoUsedSizeLong()` snapshot diff over 1000 ticks.
-
-**Phase 1:**
-- Single part placed on the launch pad sits stably at fixed height for 30s
-  (no drift, no NaN, no crash).
-- Jolt debug renderer shows the part body and pad plane at the right
-  poses.
-- Contact listener reports `OnContactPersisted` every tick while the part
-  rests on the pad. **This is the load-bearing test for the entire
-  pivot.** If it fails, redesign before continuing.
-
-**Phase 2:**
-- Saturn-V-class stack lifts off rigidly under engine thrust, gravity-
-  turn flyable to orbit, decoupler fire splits the vessel cleanly.
-- FAR / RealFuels / KER / mod-of-choice continues to function (force
-  redirect path correctness).
-- Mass-burn delta is reflected in vessel acceleration over the burn.
-- Krakensbane handoff at rotation-speed threshold doesn't cause
-  position discontinuity in either Jolt or Unity space.
-
-**Phase 2.5:**
-- Switch between two flying vessels, return to first vessel, position +
-  velocity preserved.
-- Save in flight, quit to main menu, reload save, vessel state restored.
-- Quicksave/quickload during flight (`F5`/`F9`) stable.
-
-**Phase 3:**
-- Land on Mun in a manner that uses real terrain colliders, not a flat
-  plane.
-- Drive a rover from KSC to a nearby biome boundary, terrain collider
-  streaming through PQS LOD doesn't drop the rover through the ground or
-  cause stutter.
-
-**Phase 3.5:**
-- Rover handles cleanly on rough terrain at moderate speeds.
-- Landing legs absorb a 5 m/s touchdown without breaking.
-
-**Phase 4:**
-- Long stack (30+ parts, mass ratio 50:1) under max-Q burn shows visible
-  but bounded flex (~1° max) and does not oscillate. **The wobble
-  target.**
-- Re-run all prior phases' verification — no regressions vs Jolt-native-
-  joints behavior except where the joint-collapse changes things
-  intentionally.
-- First public release tag.
-
-## Notes / open questions to resolve before starting
-
-- **Jolt kinematic contact callback semantics** — verify in Phase 1 that
-  `OnContactPersisted` and `OnContactAdded` fire for kinematic-vs-static
-  and kinematic-vs-kinematic body pairs. PhysX silenced these; Jolt
-  should not but confirm before committing.
-- **Jolt body type for parts** — `EMotionType::Kinematic` driven by
-  `SetPosition` per tick (simplest), vs `EMotionType::Kinematic` driven
-  by `SetLinearVelocity` (potentially supports CCD), vs
-  `EMotionType::Dynamic` with all forces overridden (uglier but supports
-  CCD between sub-shapes). Default to position-driven kinematic; revisit
-  in Phase 3.5 for CCD-needing parts.
-- **Jolt version pin** — pin to a tagged release rather than `main`.
-  Choose the latest tag at Phase 0 start.
-- **macOS universal build** — `lipo`-combined or `CMAKE_OSX_ARCHITECTURES`
-  multi-arch. Latter is cleaner; verify Jolt builds for both arches
-  cleanly first.
+| Vessel-CoM motion | **Jolt** rigid body |
+| Per-part SubShape transforms (visible flex) | Driven by ABA via `ModifyShapes` |
+| Forward dynamics of internal flex | **Reduced-coord Featherstone ABA, fixed-base** (this plan) |
+| Per-edge stress for break detection | **RNEA backward pass** (already in place, unchanged) |
+| Joint type | **Spherical** for all structural attachments (3-DOF angular) |
+
+## Approach — test-driven, milestone-gated
+
+Each algorithm component lands behind a unit-test gate that runs
+against the C ABI via the existing `Longeron.Native.Probe` console
+harness. KSP integration is the last gate, not the first — we don't
+re-deploy until the math is validated headlessly.
+
+### Why test-driven this round
+
+- Last round, KSP iteration was the verification loop. Every cycle
+  was 5+ minutes of build → install → reset save → fly → observe.
+  Numerical bugs hid behind game noise (visual artifacts, contact
+  forces, gimbal commands). Symptoms got mistuned as parameters.
+- The native bridge is already exercised headlessly by
+  `Longeron.Native.Probe`: a console app that loads
+  `liblongeron_native.dylib`, instantiates `Longeron.Native.World`,
+  steps it, and asserts on output records. Runs via `dotnet run` /
+  `mono` in seconds.
+- We have a working canonical Featherstone implementation in C# at
+  `mod/Longeron.Physics/src/Solver/ABA.cs` (the "vestigial" project
+  per CLAUDE.md, but the math is intact and validated by
+  `Longeron.Physics.Tests/Solver/{SimplePendulumTests,
+  RigidStackTowerTests, RneaReciprocityTests}.cs`). It is the
+  reference implementation we port to C++ guided by, *and* the
+  oracle for differential testing.
+
+### Test infrastructure (M1, lands first)
+
+- Extend `Longeron.Native.Probe`. Same harness shape (`Run(name,
+  action)` with try/catch, exit non-zero on failure). Group ABA
+  scenarios under their own section.
+- Add `mod/Longeron.Native.Probe/src/AbaTestRig.cs` — a fluent
+  helper:
+  - `Vessel rocket = rig.Vessel().BodyCreate(...).VesselTreeUpdate(parts, compliance)`
+  - `rig.Step(dt)` — drains output records into per-part snapshots
+  - `rig.PartPose(idx)` / `rig.JointWrench(idx)` — read latest
+  - `rig.ApplyForceAtPart(idx, force, point)` — input convenience
+- Add `mod/Longeron.Native.Probe/src/AbaScenarios.cs` — collection
+  of scenario builders + assertions (one method per scenario).
+
+The vessel body is `Dynamic` in Jolt for our scenarios (since ABA
+needs `last_a_body`, `last_alpha` finite-diff). For pure-flex tests
+where we want vessel CoM stationary, we apply a counter-gravity at
+the root or set linear/angular velocity targets to zero between
+ticks. Either is fine; the test rig provides both.
+
+## Files to create / modify
+
+### New (this plan)
+
+- `native/src/spatial.h` — spatial-vector primitives (M2):
+  `SpatialMotion` (6-vec [angular; linear]), `SpatialForce`,
+  `SpatialInertia` (6×6 with shorthand for diagonal-at-CoM case),
+  `SpatialTransform` (Plücker), spatial cross product `^×̂`.
+- `mod/Longeron.Native.Probe/src/AbaTestRig.cs` — test rig helper
+  (M1).
+- `mod/Longeron.Native.Probe/src/AbaScenarios.cs` — scenario
+  definitions (M1, M3-M6).
+
+### Modified
+
+- `native/src/aba.h` — minor: header comment update to reflect the
+  canonical recursion shape.
+- `native/src/aba.cpp` — full rewrite of `RunAbaForwardStep` (M3).
+- `mod/Longeron.Native.Probe/src/Program.cs` — add `Run(...)` calls
+  for new scenarios.
+
+### Reference (read-only)
+
+- `mod/Longeron.Physics/src/Solver/ABA.cs` — port from this. C#
+  works in the same general formulation: outward kinematics →
+  inward articulated-inertia → outward acceleration → integrate.
+- `mod/Longeron.Physics/src/Spatial/*.cs` — port primitives from
+  here.
+
+### Unchanged
+
+- C ABI surface (`bridge.{h,cpp}`).
+- Wire format (`records.h`, `InputBuffer.cs`, `OutputBuffer.cs`).
+- `World.cs` C# wrapper.
+- `TopologyReconciler.cs` joint-compliance extraction.
+- `LongeronSceneDriver.cs` pose composition.
+- `tree.{h,cpp}` aside from per-tick consumers reading `delta_pos` /
+  `delta_rot` (still vessel-frame derived output).
+- RNEA backward pass.
+- The `feedback_physics_visuals_align.md` invariant.
+
+## Milestones
+
+Each milestone has gates: don't move to the next until the gates
+pass. Native build + Probe execution should complete in seconds.
+
+### M1 — Test rig (no algorithm change)
+
+**Adds:** `AbaTestRig` + smoke scenarios in `AbaScenarios.cs`.
+
+**Tests** (run against current XPBD-style implementation; this round
+just proves the harness):
+
+1. *Single-part vessel, no forces, no flex.* `PartPose` not emitted
+   for root; vessel pose tracks ballistically.
+2. *Two-part vessel, no forces.* Both parts have zero flex.
+3. *Two-part vessel, gravity, root pinned.* Child develops a steady
+   flex (the v1 implementation will produce *some* answer — not yet
+   asserting what — proves the bridge round-trip works for a flexing
+   vessel).
+
+**Gate:** all three tests pass against current code; baseline numbers
+recorded for future comparison.
+
+### M2 — Spatial-vector primitives in C++
+
+**Adds:** `native/src/spatial.h`. Mirrors `Longeron.Physics/Spatial/*`:
+
+- `SpatialMotion v = (ω, v_lin)` — 6-vec, top is angular.
+- `SpatialForce f = (τ, f_lin)` — 6-vec, top is moment.
+- `SpatialInertia` — block form for inertia-at-CoM (mass × I_3 in
+  bottom-right, full I_local rotated to vessel frame in top-left,
+  zero off-diagonal). Shorthand for the diagonal-inertia case we
+  use.
+- `SpatialTransform` (Plücker) — rotation R + translation r;
+  applies as `^iX_p × v` and `^iX_p^T × f`.
+- Spatial cross `v ×̂ x` and `v ×̂* f` (the latter for force-vector
+  cross, dual operator).
+
+**Tests** (M2, in Probe `Spatial` section):
+
+1. *Identity transform is identity.*
+2. *Cross product satisfies Jacobi-style identities* (compare against
+   3-vec cross composed correctly).
+3. *Inverse transform composes to identity.*
+4. *Inertia-at-anchor parallel-axis matches direct formula.*
+
+**Gate:** all four pass.
+
+### M3 — Canonical Featherstone for spherical joints (the rewrite)
+
+**Replaces:** `RunAbaForwardStep` body. Joint state is per-edge:
+`q_joint[i]`, `ω_joint[i]` stored in `PartFlex.delta_rot` /
+`PartFlex.ang_vel` *but reinterpreted* as joint-relative (child wrt
+parent in parent's frame). `PartFlex.delta_pos` and `lin_vel` become
+**output-only**, written at the end of each substep from joint chain.
+
+**Per substep:**
+
+1. **Outward kinematics** (root → leaf, parent-first order):
+   - Root: `R_v[0] = I`, `pos_v[0] = com_local[0]`,
+     `ω_v[0] = 0`, `v_v[0] = 0`, `a_v[0] = 0`.
+     (Fixed-base flex frame; vessel CoM motion already subtracted
+     into `F_flex`.)
+   - For each non-root `i` with parent `p`:
+     - `R_v[i] = R_v[p] × q_joint[i]`
+     - `r_p_to_anchor = R_v[p] × (attach_local - com_local[p])`
+     - `anchor_pos[i] = pos_v[p] + r_p_to_anchor`
+     - `r_anchor_to_c = R_v[i] × (com_local[i] - attach_local)`
+     - `pos_v[i] = anchor_pos[i] + r_anchor_to_c`
+     - `ω_world_joint = R_v[p] × ω_joint[i]` (joint-rate in vessel)
+     - `ω_v[i] = ω_v[p] + ω_world_joint`
+     - `v_v[i] = v_v[p] + ω_v[p] × r_p_to_anchor + ω_v[i] × r_anchor_to_c`
+     - Coriolis bias `c_i` (Featherstone Eq 7.30 specialized):
+       `c_angular = ω_v[p] × ω_world_joint`
+       `c_linear = ω_v[p] × (ω_v[p] × r_p_to_anchor) + ω_v[i] × (ω_v[i] × r_anchor_to_c)`
+            `+ 2 × ω_world_joint × (ω_v[p] × r_anchor_to_c) ...` (port from C# ref)
+   - Cache `delta_pos[i] = pos_v[i] - com_local[i]` and
+     `delta_rot[i] = R_v[i]` for downstream consumers + diagnostics.
+
+2. **Inward articulated-inertia pass** (leaf → root):
+   - Each link initialized: `I^A_i = M_i` (spatial inertia at link
+     CoM, vessel frame), `p^A_i = bias`. Bias includes:
+     - Gyroscopic: `ω_v[i] ×̂* (M_i × v_v[i])`
+     - External wrench from `F_flex_i` / `T_flex_i` (vessel frame at
+       part CoM), expressed as a spatial force at link CoM, sign-
+       flipped (Featherstone convention).
+     - Spring + damper joint torque at the parent's anchor:
+       `T_spring = -k_ang × axisAngle(q_joint[i]) - c_ang × ω_joint[i]`
+       (in parent frame). Acts on child at the joint anchor (in
+       child's frame after transformation). Equal-opposite on
+       parent.
+   - Aggregate child contributions to parent:
+     `I^A_p += ^iX_p^T × (I^A_i - I^A_i S (S^T I^A_i S)⁻¹ S^T I^A_i) × ^iX_p`
+     `p^A_p += ^iX_p^T × (p^A_i + I^A_i × c_i + I^A_i S × (S^T I^A_i S)⁻¹ × (-S^T p^A_i + τ_i))`
+     For spherical, `S = [I_3; 0]` and `S^T I^A_i S` is the upper-
+     left 3×3 block of `I^A_i`. Invertible 3×3 per joint.
+
+3. **Outward acceleration solve** (root → leaf):
+   - Root: `a_root = 0` (fixed-base flex frame).
+   - For each non-root child:
+     `qddot_i = (S^T I^A_i S)⁻¹ × (-S^T p^A_i + τ_spring_i - S^T I^A_i × ^iX_p × a_p)`
+     `a_i = ^iX_p × a_p + S × qddot_i + c_i`
+
+4. **Integrate joint state** (semi-implicit Euler):
+   - `ω_joint[i] += dt × qddot_i`
+   - `q_joint[i] = integrate_quaternion(q_joint[i], ω_joint[i], dt)`
+
+5. **Compose vessel-frame outputs:** already done in pass 1
+   (`delta_pos[i]`, `delta_rot[i]` written into PartFlex).
+
+**Tests** (in Probe `Aba` section):
+
+1. *Single-link spherical pendulum at rest, no gravity.*
+   Initial `q_joint = identity`. Expect zero motion forever.
+
+2. *Spherical pendulum equilibrium under gravity.*
+   1-link vessel: root + 1 child with offset CoM. Apply uniform
+   gravity. Steady-state angular deflection `θ_ss = M·g·L / K_ang`.
+   Settle for 1 simulated second; assert `|θ_observed - θ_ss| /
+   θ_ss < 0.05`.
+
+3. *Spherical pendulum oscillation period* (with damping disabled).
+   Small initial deflection, no damping. Period `T = 2π × √(I /
+   K_ang)`. Run for 10 periods; assert phase drift < 5%.
+
+4. *Spherical pendulum critical damping decay.*
+   Initial deflection, critical damping. Settles to within 1% of
+   equilibrium in `~3 × τ` where `τ = 1/(ζ ω_n)`.
+
+**Gate:** scenarios 1-4 pass. M3 ships only if all pass.
+
+**Note on the C# reference:** `mod/Longeron.Physics/src/Solver/ABA.cs`
+is read-only reference only — it was never validated in-game and is
+not an oracle. We port guided by its structure but the C++ ground
+truth is the analytic gates (1-4 above), not parity with the C#.
+
+### M4 — Multi-link stack
+
+**Tests:**
+
+1. *3-part stack at rest, no forces.* All three parts at rest pose;
+   joint wrenches near zero.
+2. *3-part stack, axial gravity.* Bottom joint bears total weight;
+   middle joint bears top + middle weight; RNEA tension matches
+   `m_above × g` to 1%.
+3. *3-part stack, lateral gravity (offset 90°).* Bending case; each
+   joint deflects to `M_below_lever × g_lat / K_ang_joint`. Match
+   to 5%.
+4. *3-part stack, transient release.* Start with a configuration
+   bent 5° at the middle joint; release with no external force;
+   verify the chain damps to rest within expected time.
+
+**Gate:** all four pass.
+
+### M5 — Booster + side masses (the symptom test)
+
+The exact configuration that exposed the v1 bug.
+
+**Setup:** central 3-part stack with two side masses (~½ central
+mass each) attached at radial decouplers on the middle part.
+
+**Tests:**
+
+1. *Configuration at rest, axial gravity.* All parts at rest within
+   tolerance; side masses don't oscillate; joint stresses match
+   analytic.
+2. *SAS-style root torque.* Apply 5 kN·m torque on the root for
+   500 ms; verify side masses follow the rigid rotation (their
+   `q_joint` stays within 0.5° of identity throughout). **This is
+   the test the v1 implementation fails.**
+3. *Engine-style offset thrust.* Apply 50 kN axial force on the
+   bottom of the central stack with a 1° offset (simulating
+   gimbal). Verify: (a) bend angle steady-state within 0.5° of
+   analytic; (b) no oscillation; (c) thrust direction follows the
+   engine's actual flexed orientation.
+
+**Gate:** all three pass. Especially test 2 — this is the regression
+test for what we're fixing.
+
+### M6 — Long-duration stability
+
+**Tests:**
+
+1. *5000-tick free cruise.* M5 booster, no inputs. Track max angular
+   flex; assert bounded < 1°. Assert clamp never fires.
+2. *5000-tick sinusoidal SAS excitation.* Sine wave torque at 1 Hz
+   amplitude 5 kN·m for 50 ticks, then zero. Verify response
+   bounded throughout, decays after excitation ends, no NaN, no
+   drift.
+
+**Gate:** both pass.
+
+### M7 — KSP integration test (the real-world gate)
+
+Re-deploy and re-run the gimbal/SAS scenario from the screenshot.
+
+**Acceptance:**
+- No visible engine displacement under gimbal commands.
+- Vessel rotates as commanded under SAS without overshoot or roll.
+- No clamp firings in the diag stream over a 60-second flight.
+
+If M7 fails despite M1-M6 passing, the next debugging step is the
+real-vs-simulated-vessel inertia mismatch (Jolt's auto-CoM versus
+real mass distribution — flagged in the BodyMassDiag output already).
+
+## Out of scope
+
+- **Implicit Euler** (Featherstone Ch. 9): swap-in later if M6
+  long-duration tests show stability margin issues. Same wire
+  format / same joint state.
+- **Revolute / prismatic joints**: Phase 5.2 / 5.3. Reduced-coord
+  framework supports them by joint motion subspace `S`; adding is
+  additive.
+- **Loop closures** (KAS / docking-ring cycles inside a vessel):
+  out per the user's scope.
+- **Wheels / BG**: Phase 5.3+.
+- **`PartFlex` layout cleanup** (split per-edge `JointState`
+  struct): defensible follow-up; out this round.
+
+## Risk / scope estimate
+
+- M1: ~100 LOC C# (test rig + 3 scenarios). 0.5 day.
+- M2: ~300 LOC C++ (spatial primitives + 4 tests). 1 day.
+- M3: ~500 LOC C++ (full forward-pass rewrite + 4-5 tests). 2-3
+  days, gated on M3 tests passing — extra time if differential
+  test against C# uncovers porting bugs.
+- M4: ~150 LOC C# scenarios. 0.5 day.
+- M5: ~200 LOC C# scenarios. 0.5 day.
+- M6: ~100 LOC C# scenarios. 0.25 day.
+- M7: in-game test session. Whatever it takes.
+
+**Total ~5-7 days of focused work.** All steps are reversible —
+each milestone leaves the codebase buildable.
+
+## Decision points
+
+None blocking; the reference C# ABA already settles the
+formulation question. If during M3 the C# port reveals a
+numerical issue we want to fix before the C++ side, that's
+where we'd pause.
