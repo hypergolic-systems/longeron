@@ -323,6 +323,25 @@ namespace Longeron.Integration
                 node.AttachLocalX = attachLocal.x;
                 node.AttachLocalY = attachLocal.y;
                 node.AttachLocalZ = attachLocal.z;
+
+                // Phase 5 ABA: per-edge spring-damper compliance.
+                // Mirrors PartJoint.SetupJoint's stiffness formula:
+                //
+                //   K_ang = rigidity (1500) × num3 × {Stack,Srf}AttachStiffNess
+                //   num3  = (size + 1) × {stack:2, srf:0.8}
+                //
+                // multiplied by kStiffnessScale to make rockets more
+                // rigid than stock (Phase 5.0 target: visible flex
+                // only on heavy bending loads, not on every joint).
+                //
+                // K_lin defaults to 100× K_ang to keep linear flex
+                // imperceptible while angular flex remains visible.
+                //
+                // Damping = 0.7 × critical, where critical for the
+                // angular oscillator on this part is 2 × sqrt(K_ang × I).
+                // We approximate I with the average of the part's
+                // diagonal inertia. Linear uses the part's mass.
+                ComputeJointCompliance(p, i, ref node);
             }
 
             // Slice to the actual node count.
@@ -341,6 +360,80 @@ namespace Longeron.Integration
         // (Off-diagonals discarded — Phase 4 wire format only carries
         // the diagonal. Good enough for advisory magnitudes; Phase 4.x
         // can extend to a full symmetric tensor.)
+        // Phase 5 ABA stiffness scale — multiplier on top of stock's
+        // PartJoint.SetupJoint formula. Higher = more rigid, less
+        // visible flex. 30× targets "rockets that look mostly rigid
+        // but show signs of yielding under heavy bending loads."
+        const float kStiffnessScale = 30f;
+
+        // Linear-to-angular stiffness ratio. Stock uses positionSpring=1e20
+        // for linear (essentially incompressible) and finite stiffness
+        // for angular drives. We pick a finite linear stiffness 100×
+        // the angular value so linear flex stays imperceptible while
+        // angular flex remains visible.
+        const float kLinAngRatio = 100f;
+
+        // Damping ratio (fraction of critical). 0.7 is well-damped:
+        // small overshoot, fast settle. Lower values = more visible
+        // ringing. Higher = sluggish.
+        const float kDampingRatio = 0.7f;
+
+        // Compute the per-edge spring-damper compliance for the joint
+        // connecting `p` (BFS index `idx`) to its parent. Writes the
+        // 4 values into `node`. For the root (idx == 0) writes zeros.
+        static void ComputeJointCompliance(Part p, int idx,
+            ref InputBuffer.VesselTreeNode node)
+        {
+            if (idx == 0 || p.parent == null)
+            {
+                node.KLin = 0f; node.CLin = 0f;
+                node.KAng = 0f; node.CAng = 0f;
+                return;
+            }
+
+            // Stock's num3 from PartJoint.SetupJoint:320-329.
+            // attachMode determines stack vs srf node factor.
+            float nodeFactor = (p.attachMode == AttachModes.STACK) ? 2f : 0.8f;
+
+            // Resolve effective node size, mirroring PartJoint.Create.
+            int size = 1;
+            AttachNode nodeToParent = p.FindAttachNodeByPart(p.parent);
+            AttachNode nodeFromParent = p.parent.FindAttachNodeByPart(p);
+            if (nodeToParent != null && nodeFromParent != null)
+                size = Mathf.Min(nodeToParent.size, nodeFromParent.size);
+            else if (nodeToParent != null) size = nodeToParent.size;
+            else if (nodeFromParent != null) size = nodeFromParent.size;
+            else if (p.parent.srfAttachNode != null) size = p.parent.srfAttachNode.size;
+
+            float num3 = (size + 1) * nodeFactor;
+
+            // Stock's stiffness in N·m/rad (units: positionSpring on
+            // a ConfigurableJoint angular drive). Native side expects
+            // kN·m/rad for K_ang and kN/m for K_lin since our forces
+            // and masses are already in kN/tonnes.
+            float stockRigidity = 1500f;
+            float stiffStock_Nm = stockRigidity * num3 * FlightGlobals.StackAttachStiffNess;
+            float kAng_Nm = stiffStock_Nm * kStiffnessScale;
+            // Convert N·m/rad → kN·m/rad: divide by 1000.
+            float kAng_kNm = kAng_Nm * 0.001f;
+            float kLin_kNm = kAng_kNm * kLinAngRatio;
+
+            // Critical damping coefficients. For a 1-DOF mass-spring
+            // oscillator: critical = 2 × sqrt(K × m_eff). Use the part's
+            // mass for linear and an inertia ballpark for angular.
+            float partMass = node.Mass; // tonnes (already populated above)
+            if (partMass <= 1e-6f) partMass = 1e-3f;
+            float inertiaBallpark = (node.InertiaDiagX + node.InertiaDiagY + node.InertiaDiagZ) / 3f;
+            if (inertiaBallpark <= 1e-9f) inertiaBallpark = 1e-3f;
+            float cLin_kNs = kDampingRatio * 2f * Mathf.Sqrt(kLin_kNm * partMass);
+            float cAng_kNm = kDampingRatio * 2f * Mathf.Sqrt(kAng_kNm * inertiaBallpark);
+
+            node.KLin = kLin_kNm;
+            node.CLin = cLin_kNs;
+            node.KAng = kAng_kNm;
+            node.CAng = cAng_kNm;
+        }
+
         static void ComputePartInertiaDiag(
             Part p, Transform rootXform, float mass,
             out float ix, out float iy, out float iz)

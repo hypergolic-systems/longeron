@@ -77,6 +77,7 @@ add_library(longeron_native SHARED
     src/contact_listener.cpp
     src/contact_solve_listener.cpp
     src/tree.cpp
+    src/aba.cpp
 )
 
 target_include_directories(longeron_native PRIVATE src)

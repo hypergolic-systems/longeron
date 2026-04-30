@@ -131,6 +131,28 @@ namespace Longeron
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out _);
                         break;
+                    case RecordType.PartPose:
+                        world.Output.ReadPartPose(out var pp);
+                        if (JoltPart.TryGet(pp.Body.Id, out var ppOwner)
+                            && ppOwner.Part != null
+                            && ppOwner.Part.vessel != null
+                            && SceneRegistry.TryGet(ppOwner.Part.vessel, out var ppMv)
+                            && pp.PartIdx < ppMv.PartsByIdx.Count)
+                        {
+                            var ppPart = ppMv.PartsByIdx[pp.PartIdx];
+                            if (ppPart != null && ppPart.gameObject != null)
+                            {
+                                var ppJp = ppPart.gameObject.GetComponent<JoltPart>();
+                                if (ppJp != null)
+                                {
+                                    ppJp.FlexLocalPos = new Vector3(
+                                        pp.DeltaPosX, pp.DeltaPosY, pp.DeltaPosZ);
+                                    ppJp.FlexLocalRot = new Quaternion(
+                                        pp.DeltaRotX, pp.DeltaRotY, pp.DeltaRotZ, pp.DeltaRotW);
+                                }
+                            }
+                        }
+                        break;
                     case RecordType.JointWrench:
                         world.Output.ReadJointWrench(out var jw);
                         if (JoltPart.TryGet(jw.Body.Id, out var jwOwner)
@@ -348,9 +370,15 @@ namespace Longeron
                     : null;
                 if (jb == null) continue;
 
-                Vector3 rWorld = rotWorld * jb.PartLocalPos;
+                // Phase 5 flex composition: vessel pose drives the
+                // rigid base; FlexLocalPos / FlexLocalRot (from native
+                // ABA) add the per-part deflection on top.
+                //   r_world = vesselRot · (PartLocalPos + FlexLocalPos)
+                //   rot     = vesselRot · FlexLocalRot · PartLocalRot
+                Vector3 localCom = jb.PartLocalPos + jb.FlexLocalPos;
+                Vector3 rWorld = rotWorld * localCom;
                 Vector3 partPos = anchorWorld + rWorld;
-                Quaternion partRot = rotWorld * jb.PartLocalRot;
+                Quaternion partRot = rotWorld * jb.FlexLocalRot * jb.PartLocalRot;
                 Vector3 partVel = anchorVel + Vector3.Cross(angWorldF, rWorld);
 
                 rb.position        = partPos;

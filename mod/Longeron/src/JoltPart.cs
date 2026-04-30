@@ -48,6 +48,16 @@ namespace Longeron
         public Vector3 PartLocalPos;
         public Quaternion PartLocalRot = Quaternion.identity;
 
+        // Phase 5 ABA flex offset relative to PartLocalPos / PartLocalRot
+        // (the rest pose). Updated every tick from native PartPose
+        // records. ApplyVesselPose composes:
+        //   rb.position = vesselPos + vesselRot · (PartLocalPos + FlexLocalPos)
+        //   rb.rotation = vesselRot · FlexLocalRot · PartLocalRot
+        // FlexLocalPos and FlexLocalRot live in vessel-body axes.
+        // At rest (no flex): FlexLocalPos = (0,0,0), FlexLocalRot = identity.
+        public Vector3 FlexLocalPos;
+        public Quaternion FlexLocalRot = Quaternion.identity;
+
         // The latest analytic Jolt-integrated velocity for this part,
         // stored at pose readback. Unity silently discards rb.velocity
         // writes on kinematic rigidbodies, so reading rb.velocity gives

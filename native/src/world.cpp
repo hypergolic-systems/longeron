@@ -11,6 +11,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 
@@ -428,12 +429,36 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
         subs.push_back(std::move(s));
     }
 
+    // Dynamic bodies are vessels — they need MutableCompoundShape so
+    // ABA can ModifyShapes per tick to track per-part flex. Static and
+    // kinematic bodies keep StaticCompoundShape (terrain, KSC props,
+    // etc.) since their sub-shape geometry never changes after create.
+    //
+    // Single-shape bodies bypass the compound entirely (no flex is
+    // possible with only one part anyway — single-part vessels stay
+    // rigid by construction), but only when the local transform is
+    // identity; otherwise we still need a compound to carry the
+    // offset.
     JPH::RefConst<JPH::Shape> body_shape;
+    const bool needs_mutable = (motion_type == JPH::EMotionType::Dynamic);
     if (subs.size() == 1
         && subs[0].pos == JPH::Vec3::sZero()
-        && subs[0].rot == JPH::Quat::sIdentity())
+        && subs[0].rot == JPH::Quat::sIdentity()
+        && !needs_mutable)
     {
         body_shape = subs[0].shape;
+    } else if (needs_mutable) {
+        JPH::MutableCompoundShapeSettings compound;
+        for (const auto& s : subs) {
+            compound.AddShape(s.pos, s.rot, s.shape);
+        }
+        JPH::Shape::ShapeResult result = compound.Create();
+        if (result.HasError()) {
+            JPH::Trace("BodyCreate: MutableCompoundShape failed: %s for user_id %u",
+                       result.GetError().c_str(), user_id);
+            return;
+        }
+        body_shape = result.Get();
     } else {
         JPH::StaticCompoundShapeSettings compound;
         for (const auto& s : subs) {
@@ -746,14 +771,16 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
                    (unsigned)part_count, (unsigned)kMaxPartsPerVessel, body_id);
         // Skip the entire payload to keep the parser aligned.
         const size_t payload_size = static_cast<size_t>(part_count)
-            * (2 + 4 + 12 + 12 + 12);  // u16 + float + 3 × float3
+            * (2 + 4 + 12 + 12 + 12 + 16);  // u16 + float + 3 × float3 + 4 × float
         if (cur + payload_size <= end) cur += payload_size;
         else cur = end;
         return;
     }
 
     std::vector<PartNode> nodes;
+    std::vector<EdgeCompliance> compliance;
     nodes.reserve(part_count);
+    compliance.reserve(part_count);
     for (uint16_t i = 0; i < part_count; ++i) {
         PartNode n;
         n.parent_idx   = Read<uint16_t>(cur, end);
@@ -761,6 +788,11 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
         n.com_local    = ReadFloat3(cur, end);
         n.inertia_diag = ReadFloat3(cur, end);
         n.attach_local = ReadFloat3(cur, end);
+        EdgeCompliance c;
+        c.k_lin = Read<float>(cur, end);
+        c.c_lin = Read<float>(cur, end);
+        c.k_ang = Read<float>(cur, end);
+        c.c_ang = Read<float>(cur, end);
         // Validate parent: must be < i (topology order) or kInvalidPartIdx.
         if (n.parent_idx != kInvalidPartIdx && n.parent_idx >= i) {
             JPH::Trace("VesselTreeUpdate: bad parent_idx %u at node %u (must be < node)",
@@ -768,9 +800,10 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
             return;  // Drop the whole tree on malformed topology.
         }
         nodes.push_back(n);
+        compliance.push_back(c);
     }
 
-    mTreeRegistry.Upsert(body_id, std::move(nodes));
+    mTreeRegistry.Upsert(body_id, std::move(nodes), std::move(compliance));
 }
 
 void LongeronWorld::HandleSetBodyGroup(const uint8_t*& cur, const uint8_t* end) {
@@ -957,15 +990,58 @@ int32_t LongeronWorld::Step(
 
     if (kDiag) std::fprintf(stderr, "[lng] after Update, output_len=%zu\n", mOutputLen);
 
-    // 3. Emit body poses. Contact records were appended by the
-    //    contact listener during the Update call.
+    // 3a. Phase 5 ABA forward pass — integrate per-part flex state
+    //     under spring-damper joint forces + flex residual of external
+    //     wrenches. Reads vessel CoM kinematics from Jolt (post-step),
+    //     writes new per-part (delta_pos, delta_rot, vels) to each
+    //     tree's flex[] vector.
+    mTreeRegistry.RunAbaPass(mPhysicsSystem, mBodyRegistry, dt);
+
+    // 3b. Apply the new flex state to the vessel's MutableCompoundShape
+    //     so collision geometry tracks visible flex on the next tick's
+    //     broadphase. Single body's outer-AABB refit; cheap unless
+    //     vessels have many active contacts.
+    mTreeRegistry.ApplyFlexToBodies(mPhysicsSystem, mBodyRegistry);
+
+    // 3c. Emit PartPose records — one per non-root part. Emitted BEFORE
+    //     BodyPose so the C# drain populates JoltPart.FlexLocal* values
+    //     before ApplyVesselPose runs, letting the per-part rb update
+    //     compose the up-to-date flex this tick.
+    //     35 bytes per part: tag(1) + body_id(4) + part_idx(2)
+    //                        + delta_pos(12) + delta_rot(16).
+    {
+        constexpr size_t kSize = 35;
+        for (const auto& [body_id, tree] : mTreeRegistry.GetTrees()) {
+            if (tree.nodes.size() < 2) continue;
+            for (uint16_t i = 1; i < tree.nodes.size(); ++i) {
+                const auto& f = tree.flex[i];
+                if (!ReserveOutput(kSize)) break;
+                uint8_t* p = mOutputBuffer + mOutputLen;
+                *p = static_cast<uint8_t>(RecordType::PartPose); p += 1;
+                Write(p, body_id);
+                Write(p, i);
+                Write(p, f.delta_pos.GetX());
+                Write(p, f.delta_pos.GetY());
+                Write(p, f.delta_pos.GetZ());
+                Write(p, f.delta_rot.GetX());
+                Write(p, f.delta_rot.GetY());
+                Write(p, f.delta_rot.GetZ());
+                Write(p, f.delta_rot.GetW());
+                mOutputLen += kSize;
+            }
+        }
+    }
+
+    // 3d. Emit body poses now that flex is applied + part poses are
+    //     queued. The C# drain order is: PartPose updates JoltPart's
+    //     FlexLocal*; BodyPose runs ApplyVesselPose composing the
+    //     fresh flex.
     EmitBodyPoses();
 
-    // 4. Advisory RNEA pass over per-vessel spanning trees. Reads
-    //    Jolt's post-step velocity to estimate acceleration via finite
-    //    difference, computes per-edge transmitted wrench, emits a
-    //    per-vessel RneaSummary record at ~1 Hz. Phase 4.0 — no
-    //    influence on simulation.
+    // 4. Advisory RNEA pass over per-vessel spanning trees. Uses the
+    //     deflected geometry (com_local + delta_pos) so transmitted
+    //     wrench reflects current loaded shape. Reuses cached
+    //     a_body / alpha computed by RunAbaPass — no double finite-diff.
     const bool summary_ready = mTreeRegistry.RunAdvisoryPass(
         mPhysicsSystem, mBodyRegistry, mStepCount, dt);
 

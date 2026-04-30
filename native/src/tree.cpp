@@ -1,4 +1,5 @@
 #include "tree.h"
+#include "aba.h"
 #include "records.h"
 
 #include <Jolt/Jolt.h>
@@ -6,7 +7,9 @@
 #include <Jolt/Math/Vec3.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyLockInterface.h>
+#include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 
 #include <algorithm>
 #include <cmath>
@@ -14,7 +17,9 @@
 
 namespace longeron {
 
-void TreeRegistry::Upsert(uint32_t body_id, std::vector<PartNode>&& nodes) {
+void TreeRegistry::Upsert(uint32_t body_id,
+                          std::vector<PartNode>&& nodes,
+                          std::vector<EdgeCompliance>&& compliance) {
     if (nodes.empty()) {
         mTrees.erase(body_id);
         return;
@@ -22,14 +27,148 @@ void TreeRegistry::Upsert(uint32_t body_id, std::vector<PartNode>&& nodes) {
     VesselTree& t = mTrees[body_id];
     t.body_id = body_id;
     t.nodes   = std::move(nodes);
-    // Re-size accumulator to match the new node count and zero it.
-    // Topology change implies a fresh accounting window.
+    if (compliance.size() == t.nodes.size()) {
+        t.edge_compliance = std::move(compliance);
+    } else {
+        // Mismatch — fall back to defaults rather than risk OOB.
+        EdgeCompliance default_c{1.0e6f, 1.0e3f, 1.0e3f, 5.0f};
+        t.edge_compliance.assign(t.nodes.size(), default_c);
+    }
+    // Re-size accumulators to match the new node count and zero them.
+    // Topology change implies a fresh accounting window AND a fresh
+    // flex state (any prior flex was tied to the old part configuration).
     t.ext_force.assign(t.nodes.size(), JPH::Vec3::sZero());
     t.ext_torque.assign(t.nodes.size(), JPH::Vec3::sZero());
+
+    // All parts at rest pose — root stays at zero forever, others get
+    // overwritten by ABA each tick.
+    PartFlex zero_flex;
+    zero_flex.delta_pos = JPH::Vec3::sZero();
+    zero_flex.delta_rot = JPH::Quat::sIdentity();
+    zero_flex.lin_vel   = JPH::Vec3::sZero();
+    zero_flex.ang_vel   = JPH::Vec3::sZero();
+    t.flex.assign(t.nodes.size(), zero_flex);
 }
 
 void TreeRegistry::Erase(uint32_t body_id) {
     mTrees.erase(body_id);
+}
+
+void TreeRegistry::RunAbaPass(
+    const JPH::PhysicsSystem& system,
+    const std::unordered_map<uint32_t, JPH::BodyID>& registry,
+    float fixed_dt)
+{
+    if (mTrees.empty()) return;
+
+    // Previous-tick velocities per body for finite-diff acceleration.
+    // Keyed by body_id; persists across topology rebuilds (rebuild
+    // creates a new body_id so stale entries simply leak — fine for now).
+    static std::unordered_map<uint32_t, JPH::Vec3> s_prev_lin_v;
+    static std::unordered_map<uint32_t, JPH::Vec3> s_prev_ang_v;
+
+    const JPH::BodyLockInterfaceNoLock& lock_iface = system.GetBodyLockInterfaceNoLock();
+    const float inv_dt = (fixed_dt > 1e-6f) ? (1.0f / fixed_dt) : 0.0f;
+
+    for (auto& [body_id, tree] : mTrees) {
+        if (tree.nodes.size() < 2) continue;
+        auto it = registry.find(body_id);
+        if (it == registry.end()) continue;
+        JPH::BodyLockRead lock(lock_iface, it->second);
+        if (!lock.Succeeded()) continue;
+        const JPH::Body& body = lock.GetBody();
+
+        // World-frame state from Jolt.
+        const JPH::Quat body_rot = body.GetRotation();
+        const JPH::Quat body_rot_inv = body_rot.Conjugated();
+        JPH::Vec3 v_world = body.GetLinearVelocity();
+        JPH::Vec3 omega_world = body.GetAngularVelocity();
+
+        // Finite-diff in world frame (rotation-history-independent),
+        // then rotate to body frame.
+        JPH::Vec3 a_world     = JPH::Vec3::sZero();
+        JPH::Vec3 alpha_world = JPH::Vec3::sZero();
+        auto pv = s_prev_lin_v.find(body_id);
+        auto pa = s_prev_ang_v.find(body_id);
+        if (pv != s_prev_lin_v.end() && pa != s_prev_ang_v.end()) {
+            a_world     = (v_world     - pv->second) * inv_dt;
+            alpha_world = (omega_world - pa->second) * inv_dt;
+        }
+        s_prev_lin_v[body_id] = v_world;
+        s_prev_ang_v[body_id] = omega_world;
+
+        tree.last_v_body = body_rot_inv * v_world;
+        tree.last_omega  = body_rot_inv * omega_world;
+        tree.last_a_body = body_rot_inv * a_world;
+        tree.last_alpha  = body_rot_inv * alpha_world;
+
+        RunAbaForwardStep(tree,
+            tree.last_v_body, tree.last_omega,
+            tree.last_a_body, tree.last_alpha,
+            fixed_dt);
+    }
+}
+
+void TreeRegistry::ApplyFlexToBodies(
+    JPH::PhysicsSystem& system,
+    const std::unordered_map<uint32_t, JPH::BodyID>& registry)
+{
+    if (mTrees.empty()) return;
+
+    JPH::BodyInterface& body_iface = system.GetBodyInterface();
+    const JPH::BodyLockInterface& lock_iface = system.GetBodyLockInterface();
+
+    // Scratch buffers — reused across vessels to avoid per-tick alloc.
+    static thread_local std::vector<JPH::Vec3> positions;
+    static thread_local std::vector<JPH::Quat> rotations;
+
+    for (auto& [body_id, tree] : mTrees) {
+        const size_t n = tree.nodes.size();
+        if (n < 2) continue; // single-part vessel: no flex to apply
+        auto it = registry.find(body_id);
+        if (it == registry.end()) continue;
+        JPH::BodyID jph_id = it->second;
+
+        positions.resize(n);
+        rotations.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            positions[i] = tree.nodes[i].com_local + tree.flex[i].delta_pos;
+            rotations[i] = tree.flex[i].delta_rot;
+        }
+
+        // Mutate the compound shape under a write lock. The body's
+        // shape pointer is only mutable through this path.
+        {
+            JPH::BodyLockWrite lock(lock_iface, jph_id);
+            if (!lock.Succeeded()) continue;
+            const JPH::Shape* shape = lock.GetBody().GetShape();
+            if (shape == nullptr) continue;
+            if (shape->GetSubType() != JPH::EShapeSubType::MutableCompound) continue;
+
+            auto* mc = const_cast<JPH::MutableCompoundShape*>(
+                static_cast<const JPH::MutableCompoundShape*>(shape));
+            if (mc->GetNumSubShapes() != n) {
+                // SubShape ↔ part_idx alignment broken (e.g., topology
+                // changed but rebuild hasn't run). Skip rather than
+                // index out of bounds.
+                continue;
+            }
+            mc->ModifyShapes(0, n,
+                positions.data(), rotations.data(),
+                sizeof(JPH::Vec3), sizeof(JPH::Quat));
+        }
+
+        // NotifyShapeChanged refits the broadphase AABB + invalidates
+        // narrow-phase contact cache for this body. Pass DontActivate
+        // so a sleeping vessel doesn't wake from its flex update; mass
+        // properties don't change because per-part mass is unchanged
+        // and the small-deflection approximation lets the vessel
+        // CoM/inertia tensor stay as Jolt computed at body-create.
+        body_iface.NotifyShapeChanged(jph_id,
+            /*old_com*/ JPH::Vec3::sZero(),
+            /*update_mass*/ false,
+            JPH::EActivation::DontActivate);
+    }
 }
 
 void TreeRegistry::AccumulateExternalForce(
@@ -82,12 +221,19 @@ void TreeRegistry::RouteContactForce(
         static_cast<float>(P_rel.GetZ()));
     P_local = body_rot_inv * P_local;
 
-    // Closest part by CoM. Linear scan; vessels typically have ≤30
-    // parts so this is cheap. See header TODO for the O(1) replacement.
+    // Closest part by deflected CoM (com_local + delta_pos). Linear
+    // scan; vessels typically have ≤30 parts so this is cheap. Using
+    // the deflected position is important under flex — a part that's
+    // moved 5cm sideways from rest gets the contact attribution that
+    // matches its visible position, not its rigid-rest position.
+    // See header TODO for the O(1) sub-shape→part_idx replacement.
     uint16_t best_idx = 0;
     float best_dist2 = std::numeric_limits<float>::infinity();
+    const bool have_flex = (t.flex.size() == t.nodes.size());
     for (uint16_t i = 0; i < t.nodes.size(); ++i) {
-        JPH::Vec3 d = P_local - t.nodes[i].com_local;
+        JPH::Vec3 com_now = t.nodes[i].com_local;
+        if (have_flex) com_now = com_now + t.flex[i].delta_pos;
+        JPH::Vec3 d = P_local - com_now;
         float d2 = d.LengthSq();
         if (d2 < best_dist2) {
             best_dist2 = d2;
@@ -169,58 +315,16 @@ bool TreeRegistry::RunAdvisoryPass(
         mLastSummaries.clear();
     }
 
-    // Track previous-tick velocity per body to estimate per-tick
-    // acceleration via finite difference. Map keyed by body_id;
-    // updated every tick now that RNEA runs every tick.
-    static std::unordered_map<uint32_t, JPH::Vec3> s_prev_lin_v;
-    static std::unordered_map<uint32_t, JPH::Vec3> s_prev_ang_v;
-
-    const JPH::BodyLockInterfaceNoLock& lock_iface = system.GetBodyLockInterfaceNoLock();
-    const float inv_dt = (fixed_dt > 1e-6f) ? (1.0f / fixed_dt) : 0.0f;
+    // Body-frame kinematics already finite-diffed by RunAbaPass and
+    // cached on each tree (last_v_body, last_omega, last_a_body,
+    // last_alpha). RNEA reads them directly — no second pass.
+    (void)system; (void)registry; (void)fixed_dt;
 
     for (auto& [body_id, tree] : mTrees) {
-        auto it = registry.find(body_id);
-        if (it == registry.end()) continue;
-        JPH::BodyID jph_id = it->second;
-        JPH::BodyLockRead lock(lock_iface, jph_id);
-        if (!lock.Succeeded()) continue;
-        const JPH::Body& body = lock.GetBody();
-
-        // Frame discipline: ext_force / ext_torque accumulate in
-        // BODY-LOCAL axes (AccumulateExternalForce rotates each input
-        // through body_rot⁻¹). The inertial wrench formula
-        //   a_part = a_body + α × r + ω × (ω × r)
-        // uses r = com_local in BODY frame, so α / ω / a_body must be
-        // body-frame too — otherwise the cross-product terms mix
-        // frames and leak garbage components into F_self that show up
-        // as spurious shear / bending after the joint-axis projection.
-        // Get world-frame Jolt state, then rotate to body-local.
-        const JPH::Quat body_rot = body.GetRotation();
-        const JPH::Quat body_rot_inv = body_rot.Conjugated();
-
-        JPH::Vec3 v_world = body.GetLinearVelocity();
-        JPH::Vec3 omega_world = body.GetAngularVelocity();
-
-        // Finite-diff acceleration in WORLD frame, then rotate to body.
-        // Caching prev velocities in world frame keeps the math
-        // independent of body-rotation history (which would otherwise
-        // need an extra ω × v_body correction term).
-        JPH::Vec3 a_world     = JPH::Vec3::sZero();
-        JPH::Vec3 alpha_world = JPH::Vec3::sZero();
-        auto pv = s_prev_lin_v.find(body_id);
-        auto pa = s_prev_ang_v.find(body_id);
-        if (pv != s_prev_lin_v.end() && pa != s_prev_ang_v.end()) {
-            a_world     = (v_world     - pv->second) * inv_dt;
-            alpha_world = (omega_world - pa->second) * inv_dt;
-        }
-        s_prev_lin_v[body_id] = v_world;
-        s_prev_ang_v[body_id] = omega_world;
-
-        // Body-frame quantities for the inertial wrench formula.
-        JPH::Vec3 v_body = body_rot_inv * v_world;
-        JPH::Vec3 omega  = body_rot_inv * omega_world;
-        JPH::Vec3 a_body = body_rot_inv * a_world;
-        JPH::Vec3 alpha  = body_rot_inv * alpha_world;
+        const JPH::Vec3 v_body = tree.last_v_body;
+        const JPH::Vec3 omega  = tree.last_omega;
+        const JPH::Vec3 a_body = tree.last_a_body;
+        const JPH::Vec3 alpha  = tree.last_alpha;
 
         if (tree.nodes.size() < 2) {
             // Single-part vessels have no joints; clear the accumulator
@@ -249,8 +353,13 @@ bool TreeRegistry::RunAdvisoryPass(
         std::vector<JPH::Vec3> ext_force_snapshot(tree.ext_force);
         for (size_t i = 0; i < tree.nodes.size(); ++i) {
             const PartNode& n = tree.nodes[i];
+            // Use deflected r so the inertial wrench reflects the
+            // part's current loaded position, not its rigid-rest
+            // position. Important under flex — a 5cm sideways flex
+            // on a 4 t booster shifts ω × (ω × r) by a measurable amount.
+            const JPH::Vec3 r_now = n.com_local + tree.flex[i].delta_pos;
             PartInertialWrench w = InertialWrench(
-                n.com_local, n.mass, n.inertia_diag,
+                r_now, n.mass, n.inertia_diag,
                 v_body, omega, a_body, alpha);
             F_self[i] = w.force  - tree.ext_force[i];
             T_self[i] = w.torque - tree.ext_torque[i];

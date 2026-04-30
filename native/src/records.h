@@ -80,6 +80,16 @@ enum class RecordType : uint8_t {
                              //   orthonormal pair. Emitted every tick; C# stashes on JoltPart so
                              //   PartModules can read on the next tick's OnFixedUpdate to make
                              //   break decisions.
+    PartPose          = 68,  // u32 vessel_body_id, u16 part_idx,
+                             //   float3 delta_pos (vessel-body axes — flex offset from rest CoM),
+                             //   float4 delta_rot (vessel-body axes — flex rotation from rest,
+                             //                     identity at no-flex).
+                             //   Per-part flex pose from the ABA forward pass. SceneDriver applies
+                             //   to each part's Unity rb as
+                             //     rb.position = vesselPos + vesselRot · (PartLocalPos + delta_pos)
+                             //     rb.rotation = vesselRot · delta_rot · PartLocalRot
+                             //   Emitted every tick for every part with delta != identity (root
+                             //   skipped — always at rest).
 };
 
 // Phase 4: cap on parts per vessel for the RNEA pass. Stock KSP allows

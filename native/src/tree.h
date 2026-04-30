@@ -1,28 +1,36 @@
-// Per-vessel spanning tree + Featherstone RNEA pass.
+// Per-vessel spanning tree + Featherstone RNEA pass + ABA forward pass.
 //
-// Phase 4 advisory mode: read-only on Jolt's simulation. We don't drive
-// vessel motion (Jolt's job) — we decompose it into per-joint transmitted
-// wrench for breakage detection (eventually) and currently for diagnostic
-// logging.
+// Phase 5: every vessel runs a fixed-base ABA forward dynamics pass
+// over its part tree with 6-DOF compliant spring-damper joints. Jolt
+// owns the vessel's CoM motion (rigid-body integration under contacts
+// + summed external wrenches); ABA computes flex of each part relative
+// to the vessel body via per-part 6-DOF state (delta_pos, delta_rot,
+// lin_vel, ang_vel) integrated semi-implicit Euler with substepping.
 //
-// Single-body model: every part shares the vessel body's ω, α, and
-// rigid-body kinematics give each part's CoM acceleration as
-//   a_p = a_body + α × r_p + ω × (ω × r_p)
-// where r_p is the part's CoM offset from the vessel body's reference
-// point (CoM in Jolt's auto-shifted convention).
+// Per tick:
+//  1. C# accumulates per-part forces (gravity, thrust, drag, contacts)
+//     into ext_force / ext_torque.
+//  2. Jolt steps the vessel body forward dt under summed wrench +
+//     contact response.
+//  3. ABA forward pass: subtract inertial share m × (a_CoM + α × r +
+//     ω × (ω × r)) from per-part force; spring + damper joint forces
+//     act between adjacent parts at the joint anchor; substep-integrate
+//     (delta_pos, delta_rot, lin_vel, ang_vel) per part.
+//  4. ModifyShapes on the vessel's MutableCompoundShape from the new
+//     per-part offsets so collision geometry tracks visible flex.
+//  5. RNEA backward pass on the deflected geometry for break detection.
 //
-// RNEA backward pass aggregates leaf → root: the wrench transmitted
-// across a part's joint-to-parent equals the inertial wrench of that
-// part's entire subtree minus the external wrenches on the subtree.
-// For Phase 4.0 we ignore external wrenches entirely (just the inertial
-// component) — a sanity baseline that's zero when the vessel cruises and
-// nonzero in maneuvers.
+// Frame: per-part flex state lives in vessel-body axes. Part's current
+// pose = (com_local + delta_pos, delta_rot). At rest, both are zero /
+// identity. The vessel's CoM motion (a_CoM, α) is read from Jolt
+// post-step; ABA only sees the flex residual.
 
 #ifndef LONGERON_TREE_H
 #define LONGERON_TREE_H
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Math/Vec3.h>
+#include <Jolt/Math/Quat.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
@@ -40,6 +48,42 @@ struct PartNode {
     JPH::Vec3 com_local;           // CoM offset from vessel root, body axes
     JPH::Vec3 inertia_diag;        // principal inertia (diagonal approx), tonnes·m²
     JPH::Vec3 attach_local;        // joint-to-parent anchor, body axes
+};
+
+// Per-edge spring-damper config for the joint connecting a part to its
+// parent. Isotropic 6-DOF compliance for Phase 5.0:
+//   F_joint = -K_lin · displacement - C_lin · displacement_rate
+//   T_joint = -K_ang · rotation_error - C_ang · angular_velocity_diff
+// applied at the joint anchor (attach_local), equal+opposite on parent.
+//
+// Anisotropic per-axis stiffness (axial vs. shear, torsion vs. bending)
+// is a Phase 5.x extension — would need joint-frame basis vectors and
+// per-channel K/C. For v1, isotropic in vessel-body axes.
+//
+// Units: K_lin in kN/m, C_lin in kN·s/m,
+//        K_ang in kN·m/rad, C_ang in kN·m·s/rad
+// (consistent with vessel mass in tonnes, force in kN.)
+struct EdgeCompliance {
+    float k_lin;
+    float c_lin;
+    float k_ang;
+    float c_ang;
+};
+
+// Per-part flex state — the part's pose + 6-D twist relative to its
+// rigid rest configuration in vessel-body frame.
+//
+// Rest pose (delta_pos = 0, delta_rot = identity, vels = 0): part is
+// where it would be if the vessel were rigid.
+//
+// Current pose:
+//   position_in_vessel_frame = com_local + delta_pos
+//   rotation_in_vessel_frame = delta_rot       (identity at rest)
+struct PartFlex {
+    JPH::Vec3 delta_pos;     // linear offset from rest, vessel axes
+    JPH::Quat delta_rot;     // rotation flex from rest, vessel axes
+    JPH::Vec3 lin_vel;       // linear velocity, vessel axes
+    JPH::Vec3 ang_vel;       // angular velocity, vessel axes
 };
 
 // One vessel's spanning tree. Parts are stored in topology order: parent
@@ -62,6 +106,26 @@ struct VesselTree {
     // average force values back from impulse-style sums if needed.
     std::vector<JPH::Vec3> ext_force;
     std::vector<JPH::Vec3> ext_torque;
+
+    // Per-edge joint compliance. Index i corresponds to the edge from
+    // part i to nodes[i].parent_idx (root has trivial / unused entry).
+    // Set on Upsert from the C# side; constant across the tree's life
+    // (rebuilt with the topology on any change).
+    std::vector<EdgeCompliance> edge_compliance;
+
+    // Per-part flex state. Index 0 (root) stays zero — by convention
+    // the root is glued to the vessel body's anchor frame and ABA only
+    // computes flex for parts 1..n-1. Updated every tick by the ABA
+    // forward pass; consumed by RNEA / ModifyShapes / PartPose emit.
+    std::vector<PartFlex> flex;
+
+    // Last tick's body-frame kinematic state. Filled by RunAbaPass
+    // (finite-diff vs previous tick); reused by RunAdvisoryPass for
+    // the inertial wrench decomposition. Avoids a second finite-diff.
+    JPH::Vec3 last_v_body  = JPH::Vec3::sZero();
+    JPH::Vec3 last_omega   = JPH::Vec3::sZero();
+    JPH::Vec3 last_a_body  = JPH::Vec3::sZero();
+    JPH::Vec3 last_alpha   = JPH::Vec3::sZero();
 };
 
 // Per-vessel RNEA pass output. Filled by RunAdvisoryPass each tick;
@@ -132,8 +196,12 @@ struct EdgeWrenchRecord {
 class TreeRegistry {
 public:
     // Replace (or insert) the tree for a given vessel. Called from the
-    // VesselTreeUpdate input handler.
-    void Upsert(uint32_t body_id, std::vector<PartNode>&& nodes);
+    // VesselTreeUpdate input handler. compliance.size() must equal
+    // nodes.size() — index i is the joint compliance from part i to
+    // its parent (root's entry is unused).
+    void Upsert(uint32_t body_id,
+                std::vector<PartNode>&& nodes,
+                std::vector<EdgeCompliance>&& compliance);
 
     // Drop a vessel's tree (called on BodyDestroy).
     void Erase(uint32_t body_id);
@@ -162,6 +230,30 @@ public:
         JPH::Vec3 force_world, JPH::RVec3 point_world,
         JPH::RVec3 body_com_world, JPH::Quat body_rot);
 
+    // Run the ABA forward dynamics pass over every vessel tree. Reads
+    // each vessel body's velocity/acceleration (finite-diff against
+    // last tick) from Jolt, runs the substepped semi-implicit Euler
+    // integration of per-part flex state (delta_pos, delta_rot, vels)
+    // under spring-damper joint forces. Caches the body-frame
+    // velocities + accelerations on the tree for RunAdvisoryPass to
+    // reuse without a second finite-diff.
+    //
+    // Called once per Step, BEFORE ApplyFlexToBodies + RunAdvisoryPass.
+    void RunAbaPass(const JPH::PhysicsSystem& system,
+                    const std::unordered_map<uint32_t, JPH::BodyID>& registry,
+                    float fixed_dt);
+
+    // Apply each tree's flex state to the corresponding Jolt body's
+    // MutableCompoundShape. Walks per-part flex, computes the SubShape
+    // local transform (com_local + delta_pos, delta_rot), batches via
+    // ModifyShapes, then emits NotifyShapeChanged so broadphase +
+    // narrow-phase caches refresh on the next tick.
+    //
+    // Called once per Step, AFTER RunAbaPass and BEFORE RunAdvisoryPass
+    // (so RNEA sees the deflected geometry).
+    void ApplyFlexToBodies(JPH::PhysicsSystem& system,
+                           const std::unordered_map<uint32_t, JPH::BodyID>& registry);
+
     // Run RNEA for every tree using current Jolt state. Always computes
     // per-edge wrench decomposition (mLastEdgeWrenches) so PartModules
     // can read fresh joint forces every tick. The compact RneaSummary
@@ -170,13 +262,14 @@ public:
     //
     // Returns true if a new RneaSummary was produced this tick; false
     // if it was skipped (per-edge data was still computed). Called once
-    // per Step after PhysicsSystem::Update + ResolveContacts.
+    // per Step after RunAbaPass + ApplyFlexToBodies.
     bool RunAdvisoryPass(const JPH::PhysicsSystem& system,
                          const std::unordered_map<uint32_t, JPH::BodyID>& registry,
                          uint64_t step_count, float fixed_dt);
 
     const std::vector<RneaSummary>& GetLastSummaries() const { return mLastSummaries; }
     const std::vector<EdgeWrenchRecord>& GetLastEdgeWrenches() const { return mLastEdgeWrenches; }
+    const std::unordered_map<uint32_t, VesselTree>& GetTrees() const { return mTrees; }
 
 private:
     std::unordered_map<uint32_t, VesselTree> mTrees;

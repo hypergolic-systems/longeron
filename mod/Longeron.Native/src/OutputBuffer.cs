@@ -65,6 +65,20 @@ namespace Longeron.Native
     }
 
     /// <summary>
+    /// Per-part flex pose from the Phase 5 ABA forward pass, expressed
+    /// in vessel-body-local axes. Identity when the part is at rest;
+    /// non-zero under flex. Scene driver composes with the part's
+    /// PartLocalPos/Rot to produce the Unity rb's world pose.
+    /// </summary>
+    public struct PartPoseRecord
+    {
+        public BodyHandle Body;       // vessel body
+        public ushort     PartIdx;    // tree index of the part
+        public float      DeltaPosX, DeltaPosY, DeltaPosZ;
+        public float      DeltaRotX, DeltaRotY, DeltaRotZ, DeltaRotW;
+    }
+
+    /// <summary>
     /// Contact report record from <c>longeron_step</c>. Phase 1 emits
     /// one report per body pair per tick, at the deepest contact point.
     /// </summary>
@@ -181,6 +195,25 @@ namespace Longeron.Native
             record.ExtFX = *(float*)p;                     p += 4;
             record.ExtFY = *(float*)p;                     p += 4;
             record.ExtFZ = *(float*)p;                     p += 4;
+            _cursor += kPayload;
+        }
+
+        public void ReadPartPose(out PartPoseRecord record)
+        {
+            const int kPayload = 34;  // body_id(4) + part_idx(2)
+                                       // + delta_pos(float3=12) + delta_rot(float4=16)
+            EnsureBytes(kPayload);
+            byte* p = _ptr + _cursor;
+            record = default;
+            record.Body      = new BodyHandle(*(uint*)p);   p += 4;
+            record.PartIdx   = *(ushort*)p;                 p += 2;
+            record.DeltaPosX = *(float*)p;                  p += 4;
+            record.DeltaPosY = *(float*)p;                  p += 4;
+            record.DeltaPosZ = *(float*)p;                  p += 4;
+            record.DeltaRotX = *(float*)p;                  p += 4;
+            record.DeltaRotY = *(float*)p;                  p += 4;
+            record.DeltaRotZ = *(float*)p;                  p += 4;
+            record.DeltaRotW = *(float*)p;                  p += 4;
             _cursor += kPayload;
         }
 

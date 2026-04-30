@@ -99,7 +99,21 @@ namespace Longeron.Integration
             var subShapes = new List<SubShape>(64);
             outPartOffsets.Clear();
 
-            foreach (var part in vessel.parts)
+            // Phase 5 ABA: walk parts in BFS order (matching
+            // EmitVesselTree) and emit EXACTLY ONE SubShape per part so
+            // sub_shape_index == part_idx in the tree. The ABA forward
+            // pass writes per-part poses by index via
+            // MutableCompoundShape::ModifyShape on this aligned mapping.
+            //
+            // v1 limitation (TODO): multi-collider parts (Mk1 pod hatch,
+            // some engines, fairings) lose their secondary colliders —
+            // only the first usable collider on each part participates.
+            // For collision fidelity on those parts, build an inner
+            // StaticCompoundShape per part as a Phase 5.x extension.
+            // Parts with no usable collider get a tiny sphere placeholder
+            // so the index alignment holds.
+            var bfsOrder = ListPartsBfs(vessel.rootPart);
+            foreach (var part in bfsOrder)
             {
                 if (part == null) continue;
                 var partXform = part.transform;
@@ -114,9 +128,11 @@ namespace Longeron.Integration
                 };
                 outPartOffsets[part] = offset;
 
-                // Walk this part's colliders and project them into
-                // ROOT-local space (not part-local) so all sub-shapes
-                // share a single body frame.
+                // Find this part's first usable collider; project into
+                // ROOT-local space so the shape's pose is in the body's
+                // anchor frame.
+                SubShape sub = default;
+                bool found = false;
                 var colliders = part.GetComponentsInChildren<Collider>(includeInactive: true);
                 foreach (var col in colliders)
                 {
@@ -126,20 +142,38 @@ namespace Longeron.Integration
                     if (col.gameObject == null || !col.gameObject.activeInHierarchy) continue;
                     if (col.GetType().Name == "WheelCollider") continue;  // Phase 3.5
 
-                    if (TryClassify(col, rootXform, out var sub))
-                        subShapes.Add(sub);
+                    if (TryClassify(col, rootXform, out sub))
+                    {
+                        found = true;
+                        break;
+                    }
                 }
+                if (!found)
+                {
+                    // Tiny placeholder so SubShape index aligns with
+                    // part BFS index. Located at the part's CoM in
+                    // root-local space; 1 cm sphere is small enough to
+                    // never trigger meaningful contact for parts that
+                    // wouldn't have had collision anyway.
+                    sub.Kind = ShapeKind.Sphere;
+                    sub.PosX = offset.LocalPos.x;
+                    sub.PosY = offset.LocalPos.y;
+                    sub.PosZ = offset.LocalPos.z;
+                    sub.RotX = 0f; sub.RotY = 0f; sub.RotZ = 0f; sub.RotW = 1f;
+                    sub.P0 = 0.01f;
+                }
+                subShapes.Add(sub);
             }
 
             if (subShapes.Count == 0)
             {
-                Debug.Log(LogPrefix + $"vessel '{vessel.vesselName}' has no usable colliders — skipping body");
+                Debug.Log(LogPrefix + $"vessel '{vessel.vesselName}' has no parts — skipping body");
                 return false;
             }
 
             if (subShapes.Count > 255)
             {
-                Debug.LogWarning(LogPrefix + $"vessel '{vessel.vesselName}' has {subShapes.Count} colliders, capping at 255");
+                Debug.LogWarning(LogPrefix + $"vessel '{vessel.vesselName}' has {subShapes.Count} parts, capping at 255 (ABA index alignment will fail beyond this)");
                 subShapes.RemoveRange(255, subShapes.Count - 255);
             }
 
@@ -232,6 +266,33 @@ namespace Longeron.Integration
             }
 
             return true;
+        }
+
+        // BFS-flatten the part tree starting from root. Same order as
+        // TopologyReconciler.EmitVesselTree, so the SubShape index
+        // matches the VesselTree's part_idx 1:1 — needed by the ABA
+        // forward pass to ModifyShape per part by tree index.
+        static List<Part> _bfsScratch = new List<Part>(128);
+        static HashSet<Part> _bfsSeen = new HashSet<Part>();
+        internal static List<Part> ListPartsBfs(Part root)
+        {
+            _bfsScratch.Clear();
+            _bfsSeen.Clear();
+            if (root == null) return _bfsScratch;
+            _bfsScratch.Add(root);
+            _bfsSeen.Add(root);
+            for (int head = 0; head < _bfsScratch.Count; ++head)
+            {
+                var p = _bfsScratch[head];
+                if (p == null) continue;
+                foreach (var child in p.children)
+                {
+                    if (child == null || _bfsSeen.Contains(child)) continue;
+                    _bfsSeen.Add(child);
+                    _bfsScratch.Add(child);
+                }
+            }
+            return _bfsScratch;
         }
 
         // -- Internal: typed sub-shape record built per collider ---------
