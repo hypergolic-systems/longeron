@@ -18,20 +18,25 @@ namespace Longeron.Native
     }
 
     /// <summary>
-    /// Per-edge joint wrench, decomposed in the joint's reference
-    /// frame. Emitted every tick; the scene driver stashes these on
-    /// each part's <see cref="JoltPart"/> so a PartModule can read the
-    /// previous tick's values on its OnFixedUpdate to decide whether
-    /// to break.
+    /// Per-edge joint wrench in the joint's reference frame. Emitted
+    /// every tick; the scene driver stashes these on each part's
+    /// <see cref="JoltPart"/>.
+    ///
+    /// <para><c>Force.x</c> = signed axial (+ compression, − tension);
+    /// <c>(Force.y, Force.z)</c> is the shear vector with a stable
+    /// orthonormal basis perpendicular to the joint axis (parent CoM
+    /// → child joint anchor). The Y/Z split is implementation-defined
+    /// but stable across ticks for a given joint topology.</para>
+    ///
+    /// <para><c>Torque.x</c> = signed torsion (twist around the joint
+    /// axis); <c>(Torque.y, Torque.z)</c> is the bending moment.</para>
     /// </summary>
     public struct JointWrenchRecord
     {
         public BodyHandle Body;       // vessel body
         public ushort     PartIdx;    // tree index of the child part
-        public float      FAxial;     // signed: +compression, -tension
-        public float      FShear;     // magnitude
-        public float      TAxial;     // signed torsion
-        public float      TBending;   // magnitude
+        public float      FX, FY, FZ; // joint-frame force: X axial (signed), YZ shear
+        public float      TX, TY, TZ; // joint-frame torque: X torsion (signed), YZ bending
     }
 
     /// <summary>
@@ -156,16 +161,19 @@ namespace Longeron.Native
 
         public void ReadJointWrench(out JointWrenchRecord record)
         {
-            const int kPayload = 22;  // body_id(4) + part_idx(2) + 4 × float(4)
+            const int kPayload = 30;  // body_id(4) + part_idx(2)
+                                       // + force(float3=12) + torque(float3=12)
             EnsureBytes(kPayload);
             byte* p = _ptr + _cursor;
             record = default;
-            record.Body     = new BodyHandle(*(uint*)p);   p += 4;
-            record.PartIdx  = *(ushort*)p;                 p += 2;
-            record.FAxial   = *(float*)p;                  p += 4;
-            record.FShear   = *(float*)p;                  p += 4;
-            record.TAxial   = *(float*)p;                  p += 4;
-            record.TBending = *(float*)p;                  p += 4;
+            record.Body    = new BodyHandle(*(uint*)p);    p += 4;
+            record.PartIdx = *(ushort*)p;                  p += 2;
+            record.FX = *(float*)p;                        p += 4;
+            record.FY = *(float*)p;                        p += 4;
+            record.FZ = *(float*)p;                        p += 4;
+            record.TX = *(float*)p;                        p += 4;
+            record.TY = *(float*)p;                        p += 4;
+            record.TZ = *(float*)p;                        p += 4;
             _cursor += kPayload;
         }
 

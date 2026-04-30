@@ -286,31 +286,47 @@ bool TreeRegistry::RunAdvisoryPass(
             // well-defined axis, skip the decomposition for this edge.
             // Phase 4.x will use stock attach-node orientation instead.
             if (axis_len < 1e-4f) continue;
-            JPH::Vec3 axis = axis_raw / axis_len;
+            JPH::Vec3 e_x = axis_raw / axis_len;
+
+            // Build a stable orthonormal basis (e_x, e_y, e_z). Pick
+            // a reference perpendicular: vessel-body Y unless e_x is
+            // already aligned with Y, in which case use X. Gram-Schmidt
+            // gives e_y; cross product gives e_z. Stable across ticks
+            // for a fixed joint topology.
+            JPH::Vec3 ref = (std::fabs(e_x.GetY()) < 0.9f)
+                ? JPH::Vec3(0.0f, 1.0f, 0.0f)
+                : JPH::Vec3(1.0f, 0.0f, 0.0f);
+            JPH::Vec3 e_y = (ref - e_x * ref.Dot(e_x)).Normalized();
+            JPH::Vec3 e_z = e_x.Cross(e_y);
 
             const JPH::Vec3& F = F_subtree[i];
             const JPH::Vec3& T = T_subtree[i];
 
-            float f_axial = F.Dot(axis);                    // signed
-            JPH::Vec3 f_perp = F - axis * f_axial;
-            float f_shear = f_perp.Length();
+            // Project into joint frame.
+            JPH::Vec3 F_joint(F.Dot(e_x), F.Dot(e_y), F.Dot(e_z));
+            JPH::Vec3 T_joint(T.Dot(e_x), T.Dot(e_y), T.Dot(e_z));
+
+            // Scalars used for the diag summary (RneaSummary). These are
+            // derived from F_joint / T_joint; the per-edge record itself
+            // carries the full vectors.
+            float f_axial = F_joint.GetX();                 // signed
+            float f_shear = std::sqrt(F_joint.GetY() * F_joint.GetY()
+                                       + F_joint.GetZ() * F_joint.GetZ());
             float compression = (f_axial > 0.0f) ? f_axial : 0.0f;
             float tension     = (f_axial < 0.0f) ? -f_axial : 0.0f;
-
-            float t_axial = T.Dot(axis);                    // torsion (signed)
-            JPH::Vec3 t_perp = T - axis * t_axial;
+            float t_axial = T_joint.GetX();
             float t_torsion_abs = std::fabs(t_axial);
-            float t_bending = t_perp.Length();
+            float t_bending = std::sqrt(T_joint.GetY() * T_joint.GetY()
+                                         + T_joint.GetZ() * T_joint.GetZ());
 
                 // Per-edge wrench record — emitted every tick so PartModules
-            // see fresh joint stress on the next FixedUpdate.
+            // see fresh joint stress on the next FixedUpdate. Carries
+            // full F / T vectors in joint frame; X = axial.
             EdgeWrenchRecord ew;
-            ew.body_id   = body_id;
-            ew.part_idx  = i;
-            ew.f_axial   = f_axial;          // signed (+compression, -tension)
-            ew.f_shear   = f_shear;
-            ew.t_axial   = t_axial;          // signed torsion
-            ew.t_bending = t_bending;
+            ew.body_id  = body_id;
+            ew.part_idx = i;
+            ew.force    = F_joint;
+            ew.torque   = T_joint;
             mLastEdgeWrenches.push_back(ew);
 
             if (compression  > max_compression) { max_compression = compression;  max_compression_idx = i; }

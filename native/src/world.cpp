@@ -969,22 +969,26 @@ int32_t LongeronWorld::Step(
     const bool summary_ready = mTreeRegistry.RunAdvisoryPass(
         mPhysicsSystem, mBodyRegistry, mStepCount, dt);
 
-    // Per-edge wrench records — emitted every tick so PartModules see
-    // fresh joint stress on the next FixedUpdate. 23 bytes per edge:
+    // Per-edge wrench records in joint frame — emitted every tick so
+    // PartModules see fresh joint stress on the next FixedUpdate.
+    // 31 bytes per edge:
     //   tag(1) + body_id(4) + part_idx(2)
-    //   + f_axial(4) + f_shear(4) + t_axial(4) + t_bending(4).
+    //   + force(float3=12, X=axial / YZ=shear)
+    //   + torque(float3=12, X=torsion / YZ=bending).
     {
-        constexpr size_t kSize = 23;
+        constexpr size_t kSize = 31;
         for (const auto& w : mTreeRegistry.GetLastEdgeWrenches()) {
             if (!ReserveOutput(kSize)) break;
             uint8_t* p = mOutputBuffer + mOutputLen;
             *p = static_cast<uint8_t>(RecordType::JointWrench); p += 1;
             Write(p, w.body_id);
             Write(p, w.part_idx);
-            Write(p, w.f_axial);
-            Write(p, w.f_shear);
-            Write(p, w.t_axial);
-            Write(p, w.t_bending);
+            Write(p, w.force.GetX());
+            Write(p, w.force.GetY());
+            Write(p, w.force.GetZ());
+            Write(p, w.torque.GetX());
+            Write(p, w.torque.GetY());
+            Write(p, w.torque.GetZ());
             mOutputLen += kSize;
         }
     }

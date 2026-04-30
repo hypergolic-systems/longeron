@@ -72,35 +72,54 @@ namespace Longeron
         // tree doesn't track, e.g. a vessel without a sent tree).
         public ushort PartIdx = 0xFFFF;
 
-        // Phase 4 joint wrench in the joint's own reference frame
-        // (vessel-body-local axes, axial direction = parent-CoM →
-        // child-attach). Refreshed every tick by SceneDriver from
-        // native JointWrench records. PartModules read these on the
-        // next tick's OnFixedUpdate to decide whether to break.
+        // Phase 4 joint wrench in the joint's own reference frame.
+        // Refreshed every tick by SceneDriver from native JointWrench
+        // records. PartModules read these on the next tick's
+        // OnFixedUpdate to decide whether to break.
         //
-        // f_axial: signed scalar — positive = compression (squeeze;
-        //   benign), negative = tension (pull-apart; what shears bolts).
-        // f_shear: magnitude of the perpendicular-to-axis force.
-        // t_axial: signed torsion (twist about the joint axis).
-        // t_bending: magnitude of the perpendicular-to-axis torque
-        //   (e.g. radial decoupler holding a heavy booster).
+        // Frame convention:
+        //   X axis = joint axial direction (parent CoM → child joint
+        //            anchor, normalized in vessel-body frame).
+        //   Y, Z axes = orthonormal pair perpendicular to the joint
+        //               axis (stable Gram-Schmidt basis). Only the
+        //               (Y, Z) magnitude is physically meaningful;
+        //               the Y/Z split itself is implementation-defined.
         //
         // KSP convention: forces in kN, torques in kN·m.
-        public float LastJointFAxial;     // signed
-        public float LastJointFShear;     // ≥ 0
-        public float LastJointTAxial;     // signed
-        public float LastJointTBending;   // ≥ 0
+        //
+        // LastJointForce.x:    signed axial → +compression / -tension.
+        // LastJointForce.yz:   shear vector (magnitude = perpendicular
+        //                      load on the joint).
+        // LastJointTorque.x:   signed torsion (twist around the axis).
+        // LastJointTorque.yz:  bending moment (e.g. a radial decoupler
+        //                      holding a heavy booster against gravity).
+        public Vector3 LastJointForce;    // X = axial (signed), YZ = shear
+        public Vector3 LastJointTorque;   // X = torsion (signed), YZ = bending
 
         /// <summary>Compressive (≥ 0) component of the joint axial force.
         /// 0 if the joint is in tension. Doesn't break joints.</summary>
         public float LastJointCompression =>
-            LastJointFAxial > 0f ? LastJointFAxial : 0f;
+            LastJointForce.x > 0f ? LastJointForce.x : 0f;
 
         /// <summary>Tensile (≥ 0) component of the joint axial force.
         /// 0 if the joint is in compression. Compare against
-        /// joint.breakForce together with shear.</summary>
+        /// <c>part.breakingForce</c> together with <see cref="LastJointShear"/>.</summary>
         public float LastJointTension =>
-            LastJointFAxial < 0f ? -LastJointFAxial : 0f;
+            LastJointForce.x < 0f ? -LastJointForce.x : 0f;
+
+        /// <summary>Magnitude of the perpendicular-to-axis force (shear).</summary>
+        public float LastJointShear =>
+            Mathf.Sqrt(LastJointForce.y * LastJointForce.y +
+                       LastJointForce.z * LastJointForce.z);
+
+        /// <summary>Signed torsion (twist around the joint axis).</summary>
+        public float LastJointTorsion => LastJointTorque.x;
+
+        /// <summary>Magnitude of the bending moment (perpendicular
+        /// torque component). Compare against <c>part.breakingTorque</c>.</summary>
+        public float LastJointBending =>
+            Mathf.Sqrt(LastJointTorque.y * LastJointTorque.y +
+                       LastJointTorque.z * LastJointTorque.z);
 
         // Pending body destroys from GameObjects Unity has destroyed
         // since the last drain. Static so the queue survives even when

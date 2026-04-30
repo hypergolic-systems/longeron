@@ -131,10 +131,8 @@ namespace Longeron
                                 var jb = jwPart.gameObject.GetComponent<JoltPart>();
                                 if (jb != null)
                                 {
-                                    jb.LastJointFAxial   = jw.FAxial;
-                                    jb.LastJointFShear   = jw.FShear;
-                                    jb.LastJointTAxial   = jw.TAxial;
-                                    jb.LastJointTBending = jw.TBending;
+                                    jb.LastJointForce  = new Vector3(jw.FX, jw.FY, jw.FZ);
+                                    jb.LastJointTorque = new Vector3(jw.TX, jw.TY, jw.TZ);
                                 }
                             }
                         }

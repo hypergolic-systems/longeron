@@ -96,18 +96,33 @@ struct RneaSummary {
     float    alpha_mag;   // |α_body| this tick
 };
 
-// Per-edge wrench decomposition emitted every tick. PartModules read
-// these (via JoltPart) on the next tick's OnFixedUpdate to decide
-// whether to break. f_axial is signed: +compression / -tension.
-// t_axial is signed (torsion direction). f_shear and t_bending are
-// magnitudes (unsigned).
+// Per-edge wrench in the joint's reference frame, emitted every tick.
+// PartModules read these (via JoltPart) on the next tick's
+// OnFixedUpdate to decide whether to break.
+//
+// Frame convention (orthonormal, right-handed):
+//   e_x = joint axial direction (parent CoM → child joint anchor,
+//         normalized in vessel-body axes).
+//   e_y, e_z = perpendicular pair built from a stable Gram-Schmidt
+//         against vessel-body Y (or X if Y is parallel to e_x).
+//
+// Force vector semantics:
+//   force.x  → signed axial: +compression (squeeze, benign) /
+//              -tension (pull-apart, breaks bolts).
+//   force.y, force.z → shear (perpendicular to axis); magnitude is
+//                       physically meaningful, individual y/z split
+//                       is implementation-defined but stable across
+//                       ticks for a given joint topology.
+//
+// Torque vector semantics:
+//   torque.x → signed torsion (twist around the axis).
+//   torque.y, torque.z → bending moment (perpendicular to axis);
+//                        magnitude is physically meaningful.
 struct EdgeWrenchRecord {
-    uint32_t body_id;
-    uint16_t part_idx;
-    float    f_axial;
-    float    f_shear;
-    float    t_axial;
-    float    t_bending;
+    uint32_t  body_id;
+    uint16_t  part_idx;
+    JPH::Vec3 force;     // joint frame: X = axial, YZ = shear
+    JPH::Vec3 torque;    // joint frame: X = torsion, YZ = bending
 };
 
 class TreeRegistry {
