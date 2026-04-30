@@ -72,7 +72,9 @@ enum class RecordType : uint8_t {
                              //   Emitted at ~1 Hz cadence for log smoothing.
     JointWrench       = 67,  // u32 vessel_body_id, u16 part_idx,
                              //   float3 force_joint  (X=axial: +compression / -tension; YZ=shear),
-                             //   float3 torque_joint (X=torsion signed; YZ=bending).
+                             //   float3 torque_joint (X=torsion signed; YZ=bending),
+                             //   float3 ext_force    (per-part external force this tick, body axes;
+                             //                       diag-only — gravity + thrust + drag + contact).
                              //   Per-edge wrench in joint reference frame. e_x = parent_CoM →
                              //   child_attach (normalized). e_y, e_z form a stable Gram-Schmidt
                              //   orthonormal pair. Emitted every tick; C# stashes on JoltPart so

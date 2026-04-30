@@ -186,22 +186,41 @@ bool TreeRegistry::RunAdvisoryPass(
         if (!lock.Succeeded()) continue;
         const JPH::Body& body = lock.GetBody();
 
-        JPH::Vec3 v_body = body.GetLinearVelocity();
-        JPH::Vec3 omega  = body.GetAngularVelocity();
+        // Frame discipline: ext_force / ext_torque accumulate in
+        // BODY-LOCAL axes (AccumulateExternalForce rotates each input
+        // through body_rot⁻¹). The inertial wrench formula
+        //   a_part = a_body + α × r + ω × (ω × r)
+        // uses r = com_local in BODY frame, so α / ω / a_body must be
+        // body-frame too — otherwise the cross-product terms mix
+        // frames and leak garbage components into F_self that show up
+        // as spurious shear / bending after the joint-axis projection.
+        // Get world-frame Jolt state, then rotate to body-local.
+        const JPH::Quat body_rot = body.GetRotation();
+        const JPH::Quat body_rot_inv = body_rot.Conjugated();
 
-        // Acceleration estimate from finite difference. Crude — for
-        // advisory log it's fine; Phase 4.1 can read accumulated forces
-        // directly to avoid the 1-tick lag.
-        JPH::Vec3 a_body = JPH::Vec3::sZero();
-        JPH::Vec3 alpha  = JPH::Vec3::sZero();
+        JPH::Vec3 v_world = body.GetLinearVelocity();
+        JPH::Vec3 omega_world = body.GetAngularVelocity();
+
+        // Finite-diff acceleration in WORLD frame, then rotate to body.
+        // Caching prev velocities in world frame keeps the math
+        // independent of body-rotation history (which would otherwise
+        // need an extra ω × v_body correction term).
+        JPH::Vec3 a_world     = JPH::Vec3::sZero();
+        JPH::Vec3 alpha_world = JPH::Vec3::sZero();
         auto pv = s_prev_lin_v.find(body_id);
         auto pa = s_prev_ang_v.find(body_id);
         if (pv != s_prev_lin_v.end() && pa != s_prev_ang_v.end()) {
-            a_body = (v_body - pv->second) * inv_dt;
-            alpha  = (omega  - pa->second) * inv_dt;
+            a_world     = (v_world     - pv->second) * inv_dt;
+            alpha_world = (omega_world - pa->second) * inv_dt;
         }
-        s_prev_lin_v[body_id] = v_body;
-        s_prev_ang_v[body_id] = omega;
+        s_prev_lin_v[body_id] = v_world;
+        s_prev_ang_v[body_id] = omega_world;
+
+        // Body-frame quantities for the inertial wrench formula.
+        JPH::Vec3 v_body = body_rot_inv * v_world;
+        JPH::Vec3 omega  = body_rot_inv * omega_world;
+        JPH::Vec3 a_body = body_rot_inv * a_world;
+        JPH::Vec3 alpha  = body_rot_inv * alpha_world;
 
         if (tree.nodes.size() < 2) {
             // Single-part vessels have no joints; clear the accumulator
@@ -223,6 +242,11 @@ bool TreeRegistry::RunAdvisoryPass(
         // peak forces during impacts and decoupler fires.
         std::vector<JPH::Vec3> F_self(tree.nodes.size(), JPH::Vec3::sZero());
         std::vector<JPH::Vec3> T_self(tree.nodes.size(), JPH::Vec3::sZero());
+        // Snapshot the per-part external force before we drain the
+        // accumulator. Used below as a diag field in the emitted edge
+        // record so C# can see whether contact lambdas reached each
+        // part for this tick.
+        std::vector<JPH::Vec3> ext_force_snapshot(tree.ext_force);
         for (size_t i = 0; i < tree.nodes.size(); ++i) {
             const PartNode& n = tree.nodes[i];
             PartInertialWrench w = InertialWrench(
@@ -319,14 +343,19 @@ bool TreeRegistry::RunAdvisoryPass(
             float t_bending = std::sqrt(T_joint.GetY() * T_joint.GetY()
                                          + T_joint.GetZ() * T_joint.GetZ());
 
-                // Per-edge wrench record — emitted every tick so PartModules
+            // Per-edge wrench record — emitted every tick so PartModules
             // see fresh joint stress on the next FixedUpdate. Carries
-            // full F / T vectors in joint frame; X = axial.
+            // full F / T vectors in joint frame; X = axial. Also carries
+            // F_ext (this part's accumulated external force, body axes)
+            // so the verbose C# log can show what's hitting each part —
+            // useful for diagnosing whether contact lambdas are reaching
+            // the right part.
             EdgeWrenchRecord ew;
-            ew.body_id  = body_id;
-            ew.part_idx = i;
-            ew.force    = F_joint;
-            ew.torque   = T_joint;
+            ew.body_id   = body_id;
+            ew.part_idx  = i;
+            ew.force     = F_joint;
+            ew.torque    = T_joint;
+            ew.ext_force = ext_force_snapshot[i];
             mLastEdgeWrenches.push_back(ew);
 
             if (compression  > max_compression) { max_compression = compression;  max_compression_idx = i; }

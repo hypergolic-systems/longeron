@@ -971,12 +971,13 @@ int32_t LongeronWorld::Step(
 
     // Per-edge wrench records in joint frame — emitted every tick so
     // PartModules see fresh joint stress on the next FixedUpdate.
-    // 31 bytes per edge:
+    // 43 bytes per edge:
     //   tag(1) + body_id(4) + part_idx(2)
     //   + force(float3=12, X=axial / YZ=shear)
-    //   + torque(float3=12, X=torsion / YZ=bending).
+    //   + torque(float3=12, X=torsion / YZ=bending)
+    //   + ext_force(float3=12, body axes — diag).
     {
-        constexpr size_t kSize = 31;
+        constexpr size_t kSize = 43;
         for (const auto& w : mTreeRegistry.GetLastEdgeWrenches()) {
             if (!ReserveOutput(kSize)) break;
             uint8_t* p = mOutputBuffer + mOutputLen;
@@ -989,6 +990,9 @@ int32_t LongeronWorld::Step(
             Write(p, w.torque.GetX());
             Write(p, w.torque.GetY());
             Write(p, w.torque.GetZ());
+            Write(p, w.ext_force.GetX());
+            Write(p, w.ext_force.GetY());
+            Write(p, w.ext_force.GetZ());
             mOutputLen += kSize;
         }
     }

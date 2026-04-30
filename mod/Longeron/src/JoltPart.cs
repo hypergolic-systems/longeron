@@ -96,6 +96,30 @@ namespace Longeron
         public Vector3 LastJointForce;    // X = axial (signed), YZ = shear
         public Vector3 LastJointTorque;   // X = torsion (signed), YZ = bending
 
+        // Stock-equivalent joint break thresholds for this joint
+        // (joint-to-parent), in kN / kN·m. Computed at JoltPart attach
+        // and on topology rebuild by replicating PartJoint.SetupJoint:333
+        // + SetUnbreakable:425:
+        //
+        //   EffectiveBreakForce  = min(host.bf, target.bf)
+        //                          × num3 / internalJoints
+        //                          × PhysicsGlobals.JointBreakForceFactor
+        //
+        //   num3            = (size + 1) × stackNodeFactor (=2) for STACK
+        //                     (size + 1) × srfNodeFactor   (=0.8) for SRF_ATTACH
+        //   internalJoints  = 3 for stack-mode size ≥ 2 non-docking, 1 otherwise
+        //   JointBreakForceFactor = 50 in stock Physics.cfg (default 17
+        //                            in source) — transient-impulse
+        //                            headroom; PhysX joints don't break
+        //                            until current force exceeds this.
+        //
+        // Verified live (kspcli eval) that this equals
+        // part.attachJoint.Joint.breakForce — i.e. our gauges compare
+        // against the same threshold stock's PhysX joint compares against.
+        // 0 = "not yet computed" — gauge falls back to Part.breakingForce.
+        public float EffectiveBreakForce;
+        public float EffectiveBreakTorque;
+
         /// <summary>Compressive (≥ 0) component of the joint axial force.
         /// 0 if the joint is in tension. Doesn't break joints.</summary>
         public float LastJointCompression =>
@@ -164,6 +188,71 @@ namespace Longeron
 
         public static bool TryGet(uint bodyId, out JoltPart jb) =>
             _byHandle.TryGetValue(bodyId, out jb);
+
+        // Compute the stock-equivalent break thresholds for this part's
+        // joint-to-parent, replicating PartJoint.SetupJoint:333-334 and
+        // SetUnbreakable:425. Reads the PartJoint stock built (via
+        // part.attachJoint) plus FlightGlobals / PhysicsGlobals
+        // parameters. No-op for the vessel root (part.parent == null)
+        // and for parts without an attachJoint yet — caller can re-run
+        // once attachJoint is populated.
+        public void RecomputeBreakThresholds()
+        {
+            EffectiveBreakForce  = 0f;
+            EffectiveBreakTorque = 0f;
+            if (Part == null || Part.parent == null) return;
+
+            var pj = Part.attachJoint;
+            int internalJoints = (pj != null && pj.joints != null && pj.joints.Count > 0)
+                ? pj.joints.Count : 1;
+
+            float baseBF = Part.breakingForce;
+            float baseBT = Part.breakingTorque;
+            if (pj != null && pj.Host != null && pj.Target != null)
+            {
+                baseBF = Mathf.Min(pj.Host.breakingForce, pj.Target.breakingForce);
+                baseBT = Mathf.Min(pj.Host.breakingTorque, pj.Target.breakingTorque);
+            }
+            else if (Part.parent != null)
+            {
+                baseBF = Mathf.Min(Part.breakingForce, Part.parent.breakingForce);
+                baseBT = Mathf.Min(Part.breakingTorque, Part.parent.breakingTorque);
+            }
+
+            // Resolve attach mode + node size, mirroring PartJoint.Create's
+            // "pick smaller of nodeToParent.size and nodeFromParent.size,
+            // fall back to parent's srfAttachNode" logic.
+            AttachModes mode = Part.attachMode;
+            AttachNode nodeToParent   = Part.FindAttachNodeByPart(Part.parent);
+            AttachNode nodeFromParent = Part.parent.FindAttachNodeByPart(Part);
+            int size = 1;
+            if (nodeToParent != null && nodeFromParent != null)
+                size = Mathf.Min(nodeToParent.size, nodeFromParent.size);
+            else if (nodeToParent != null)   size = nodeToParent.size;
+            else if (nodeFromParent != null) size = nodeFromParent.size;
+            else if (Part.parent.srfAttachNode != null)
+                size = Part.parent.srfAttachNode.size;
+
+            // PartJoint.cs:320-329: num3 only uses the {stack,srf}NodeFactor
+            // constants (2 / 0.8). FlightGlobals.{Stack,Srf}AttachStiffNess
+            // feeds into the angular `stiffness` drive only, NOT num3 — so
+            // the breakingForce formula doesn't see it either.
+            float nodeFactor = (mode == AttachModes.STACK) ? 2f : 0.8f;
+            float num3 = (size + 1) * nodeFactor;
+
+            float forceFactor  = PhysicsGlobals.JointBreakForceFactor;
+            float torqueFactor = PhysicsGlobals.JointBreakTorqueFactor;
+
+            // Per-joint thresholds. Stock's gauge of "joint failure" is
+            // hit when ANY of the internal joints exceeds its per-joint
+            // threshold. With uniform load, the effective whole-joint
+            // capacity is internalJoints × per-joint = num3 ×
+            // JointBreakForceFactor × baseBF, but loads can concentrate
+            // on one of the 3 (e.g. bending), so per-joint is the safer
+            // comparison value.
+            EffectiveBreakForce  = baseBF * num3 / internalJoints * forceFactor;
+            EffectiveBreakTorque = baseBT * num3 / internalJoints * torqueFactor;
+        }
 
         // Public hook for sibling component-owners (QuadBody for PQS
         // terrain quads, StaticBody for KSC static colliders) that

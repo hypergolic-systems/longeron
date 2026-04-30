@@ -152,6 +152,13 @@ namespace Longeron
                 var module = v.FindVesselModuleImplementing<LongeronVesselModule>();
                 if (module != null) module.OnGoOffRails();
             }
+
+            // Phase 4.5: per-joint stress gauges. Reuses stock's
+            // TemperatureGaugeSystem visual prefab to render small
+            // bar overlays at each joint, color-graded against
+            // breakingForce / breakingTorque.
+            if (gameObject.GetComponent<StressGaugeSystem>() == null)
+                gameObject.AddComponent<StressGaugeSystem>();
         }
 
         // Flight scene exit: tear down the world before vessels start
@@ -165,6 +172,12 @@ namespace Longeron
                 Debug.Log(LogPrefix + $"leaving flight for {nextScene} — disposing world");
                 DisposeWorld();
             }
+
+            // Tear down the gauge UI on any scene exit (FlightScene or
+            // not). The component drops itself + child gauges on
+            // OnDestroy.
+            var gauge = gameObject.GetComponent<StressGaugeSystem>();
+            if (gauge != null) Destroy(gauge);
         }
 
         static void DisposeWorld()

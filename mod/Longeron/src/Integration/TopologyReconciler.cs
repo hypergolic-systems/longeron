@@ -173,6 +173,11 @@ namespace Longeron.Integration
                     jb.PartLocalRot = off.LocalRot;
                 }
                 jb.LastMass = p.mass + p.GetResourceMass();
+                // Pre-compute stock-equivalent joint break thresholds for
+                // this part's joint-to-parent. Used by StressGauge and
+                // (eventually) joint-break detection in place of the much
+                // stricter Part.breakingForce.
+                jb.RecomputeBreakThresholds();
             }
 
             // Idempotently re-apply kinematic takeover for any newly-

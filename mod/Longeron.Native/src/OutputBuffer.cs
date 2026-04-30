@@ -37,6 +37,9 @@ namespace Longeron.Native
         public ushort     PartIdx;    // tree index of the child part
         public float      FX, FY, FZ; // joint-frame force: X axial (signed), YZ shear
         public float      TX, TY, TZ; // joint-frame torque: X torsion (signed), YZ bending
+        public float      ExtFX, ExtFY, ExtFZ; // diag: per-part external force this tick,
+                                                //   body-local axes (gravity + thrust + drag
+                                                //   + contact lambdas).
     }
 
     /// <summary>
@@ -161,8 +164,9 @@ namespace Longeron.Native
 
         public void ReadJointWrench(out JointWrenchRecord record)
         {
-            const int kPayload = 30;  // body_id(4) + part_idx(2)
+            const int kPayload = 42;  // body_id(4) + part_idx(2)
                                        // + force(float3=12) + torque(float3=12)
+                                       // + ext_force(float3=12)
             EnsureBytes(kPayload);
             byte* p = _ptr + _cursor;
             record = default;
@@ -174,6 +178,9 @@ namespace Longeron.Native
             record.TX = *(float*)p;                        p += 4;
             record.TY = *(float*)p;                        p += 4;
             record.TZ = *(float*)p;                        p += 4;
+            record.ExtFX = *(float*)p;                     p += 4;
+            record.ExtFY = *(float*)p;                     p += 4;
+            record.ExtFZ = *(float*)p;                     p += 4;
             _cursor += kPayload;
         }
 

@@ -28,6 +28,15 @@ namespace Longeron
     {
         const string LogPrefix = "[Longeron/driver] ";
 
+        // Phase 4 verbose RNEA logging: dump every per-edge wrench for
+        // the active vessel every kVerboseLogStride ticks. Aggressive
+        // detail for diagnosing why specific joints show unexpected
+        // values (suspicious bending at top of stack, contact-noise
+        // jitter, etc.). Set false to silence.
+        public static bool _verboseRneaLog = true;
+        const int kVerboseLogStride = 5;   // ~10 Hz at 50 Hz physics
+        static long _rneaTickCounter = 0;
+
         // Called by LongeronAddon when a new flight-scene world is
         // created so per-world transient state resets.
         internal void NotifyWorldCreated()
@@ -43,6 +52,11 @@ namespace Longeron
 
             float dt = Time.fixedDeltaTime;
             if (dt <= 0f) return;
+
+            // Tick counter for the verbose RNEA log (used in the
+            // JointWrench drain below). Incremented before drain so
+            // tick==N matches the records produced by step N.
+            ++_rneaTickCounter;
 
             // Phase 3b: anchor Jolt to the active vessel's mainBody-fixed
             // frame. Every bridge write goes through CbFrame.WorldToCb;
@@ -134,6 +148,12 @@ namespace Longeron
                                     jb.LastJointForce  = new Vector3(jw.FX, jw.FY, jw.FZ);
                                     jb.LastJointTorque = new Vector3(jw.TX, jw.TY, jw.TZ);
                                 }
+                                if (_verboseRneaLog
+                                    && (_rneaTickCounter % kVerboseLogStride) == 0
+                                    && jwPart.vessel == FlightGlobals.ActiveVessel)
+                                {
+                                    LogVerboseEdge(_rneaTickCounter, jwPart, jw);
+                                }
                             }
                         }
                         break;
@@ -195,6 +215,69 @@ namespace Longeron
 
         // Single-body mass aggregation: sum every part's mass +
         // resources, compare to the per-vessel cached total, emit one
+        // Verbose per-edge dump for the active vessel. Logged at
+        // ~10 Hz so a 30-second flight produces ~300 lines per joint
+        // — enough density to spot transients without drowning the
+        // log. Format is one line per joint per cadence-tick:
+        //   [Longeron/rnea-e] tick=N 'PartName'(←'ParentName')
+        //     F(ax,sh1,sh2)=(…)kN T(tor,bn1,bn2)=(…)kN·m
+        //     bF=… bT=… fR=… tR=…
+        //
+        // Where:
+        //   ax  = signed axial force (joint frame X) (+compression / -tension).
+        //   sh1, sh2 = perpendicular shear components (joint frame Y, Z).
+        //   tor = signed torsion (joint frame X torque).
+        //   bn1, bn2 = perpendicular bending components.
+        //   bF, bT = stock break thresholds for context.
+        //   fR, tR = ratios that the StressGauge UI displays.
+        //
+        // grep "Longeron/rnea-e" KSP.log to extract a flight's worth.
+        static void LogVerboseEdge(long tick, Part p, Native.JointWrenchRecord jw)
+        {
+            string parentName = (p.parent != null)
+                ? (p.parent.partInfo != null ? p.parent.partInfo.name : p.parent.name)
+                : "<root>";
+            string partName = p.partInfo != null ? p.partInfo.name : p.name;
+
+            // Stock-equivalent break thresholds cached on JoltPart.
+            // Matches the live ConfigurableJoint.breakForce stock sets
+            // (verified via kspcli). Falls back to Part.breakingForce
+            // when not yet computed.
+            var jp = p.gameObject != null
+                ? p.gameObject.GetComponent<JoltPart>() : null;
+            float bf = (jp != null && jp.EffectiveBreakForce  > 0f)
+                ? jp.EffectiveBreakForce  : p.breakingForce;
+            float bt = (jp != null && jp.EffectiveBreakTorque > 0f)
+                ? jp.EffectiveBreakTorque : p.breakingTorque;
+
+            float tens  = jw.FX < 0f ? -jw.FX : 0f;
+            float shear = Mathf.Sqrt(jw.FY * jw.FY + jw.FZ * jw.FZ);
+            float fr = bf > 0f
+                ? Mathf.Sqrt(tens * tens + shear * shear) / bf
+                : 0f;
+
+            float tors = Mathf.Abs(jw.TX);
+            float bend = Mathf.Sqrt(jw.TY * jw.TY + jw.TZ * jw.TZ);
+            float tr = bt > 0f
+                ? Mathf.Sqrt(tors * tors + bend * bend) / bt
+                : 0f;
+
+            float extMag = Mathf.Sqrt(jw.ExtFX * jw.ExtFX
+                                       + jw.ExtFY * jw.ExtFY
+                                       + jw.ExtFZ * jw.ExtFZ);
+
+            Debug.Log("[Longeron/rnea-e] " + string.Format(
+                "tick={0} '{1}'(←'{2}') F(ax,s1,s2)=({3:+0.0;-0.0},{4:+0.0;-0.0},{5:+0.0;-0.0})kN " +
+                "T(tor,b1,b2)=({6:+0.00;-0.00},{7:+0.00;-0.00},{8:+0.00;-0.00})kN·m " +
+                "ext=({13:+0.0;-0.0},{14:+0.0;-0.0},{15:+0.0;-0.0})kN |ext|={16:F1} " +
+                "bF={9:F0} bT={10:F0} fR={11:F2} tR={12:F2}",
+                tick, partName, parentName,
+                jw.FX, jw.FY, jw.FZ,
+                jw.TX, jw.TY, jw.TZ,
+                bf, bt, fr, tr,
+                jw.ExtFX, jw.ExtFY, jw.ExtFZ, extMag));
+        }
+
         // MassUpdate when the delta crosses the threshold. Per-part
         // jb.LastMass is also updated so the per-tick delta detection
         // remains stable across topology changes.

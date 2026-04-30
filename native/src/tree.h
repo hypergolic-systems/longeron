@@ -121,8 +121,12 @@ struct RneaSummary {
 struct EdgeWrenchRecord {
     uint32_t  body_id;
     uint16_t  part_idx;
-    JPH::Vec3 force;     // joint frame: X = axial, YZ = shear
-    JPH::Vec3 torque;    // joint frame: X = torsion, YZ = bending
+    JPH::Vec3 force;       // joint frame: X = axial, YZ = shear
+    JPH::Vec3 torque;      // joint frame: X = torsion, YZ = bending
+    JPH::Vec3 ext_force;   // diag: per-part external force this tick,
+                            //   body-local axes (gravity + thrust + drag
+                            //   + contact lambdas summed). Lets the C#
+                            //   side see whether contact is routing.
 };
 
 class TreeRegistry {
