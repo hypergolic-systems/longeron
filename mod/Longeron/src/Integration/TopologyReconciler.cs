@@ -362,21 +362,29 @@ namespace Longeron.Integration
         // can extend to a full symmetric tensor.)
         // Phase 5 ABA stiffness scale — multiplier on top of stock's
         // PartJoint.SetupJoint formula. Higher = more rigid, less
-        // visible flex. 30× targets "rockets that look mostly rigid
-        // but show signs of yielding under heavy bending loads."
-        const float kStiffnessScale = 30f;
+        // visible flex. Started at 30× but the resulting transients on
+        // pad-rest could push parts into the ground faster than
+        // CollisionEnhancer's anti-clip threshold, causing parts to
+        // explode. 5× is conservative for v1 — small visible flex on
+        // heavy bending, no transient blowup. Crank up gradually as
+        // stability allows.
+        const float kStiffnessScale = 5f;
 
         // Linear-to-angular stiffness ratio. Stock uses positionSpring=1e20
         // for linear (essentially incompressible) and finite stiffness
-        // for angular drives. We pick a finite linear stiffness 100×
-        // the angular value so linear flex stays imperceptible while
-        // angular flex remains visible.
-        const float kLinAngRatio = 100f;
+        // for angular drives. With kStiffnessScale=5 and ratio=5, linear
+        // K is moderate enough that linear flex stays sub-cm under any
+        // realistic load while angular flex of stock-equivalent
+        // magnitude remains.
+        const float kLinAngRatio = 5f;
 
-        // Damping ratio (fraction of critical). 0.7 is well-damped:
-        // small overshoot, fast settle. Lower values = more visible
-        // ringing. Higher = sluggish.
-        const float kDampingRatio = 0.7f;
+        // Damping ratio (fraction of critical). 1.0 = critical (fastest
+        // non-overshoot decay). Super-critical (>1) introduces a fast
+        // eigenvalue at -(ζ + sqrt(ζ²-1))·ω that needs dt < 0.76/ω for
+        // semi-implicit Euler stability — small parts (low inertia,
+        // ω ~500 rad/s) can blow up at our 1 ms substep. Critical
+        // gives stable dt < 2/ω = 4 ms margin without overshoot.
+        const float kDampingRatio = 1.0f;
 
         // Compute the per-edge spring-damper compliance for the joint
         // connecting `p` (BFS index `idx`) to its parent. Writes the

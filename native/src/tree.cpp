@@ -48,10 +48,25 @@ void TreeRegistry::Upsert(uint32_t body_id,
     zero_flex.lin_vel   = JPH::Vec3::sZero();
     zero_flex.ang_vel   = JPH::Vec3::sZero();
     t.flex.assign(t.nodes.size(), zero_flex);
+
+    // Rest-pose cache invalidated on topology rebuild; will be
+    // re-captured from the new compound shape on first ApplyFlexToBodies.
+    t.rest_captured = false;
+    t.rest_subshape_pos.clear();
+    t.rest_subshape_rot.clear();
 }
 
 void TreeRegistry::Erase(uint32_t body_id) {
     mTrees.erase(body_id);
+}
+
+void TreeRegistry::SetSubShapeMap(uint32_t body_id, std::vector<uint16_t>&& subshape_to_part) {
+    // Tree may not exist yet (BodyCreate + SubShapeMap arrive before
+    // VesselTreeUpdate in the same input batch); create a stub entry
+    // that the upcoming Upsert will fill in.
+    VesselTree& t = mTrees[body_id];
+    t.body_id = body_id;
+    t.subshape_to_part = std::move(subshape_to_part);
 }
 
 void TreeRegistry::RunAbaPass(
@@ -66,6 +81,15 @@ void TreeRegistry::RunAbaPass(
     // creates a new body_id so stale entries simply leak — fine for now).
     static std::unordered_map<uint32_t, JPH::Vec3> s_prev_lin_v;
     static std::unordered_map<uint32_t, JPH::Vec3> s_prev_ang_v;
+
+    // Per-body tick counter since first ABA pass for that body. ABA
+    // is skipped for the first kAbaWarmupTicks ticks so finite-diff
+    // data has time to stabilize against actual Jolt-integrated motion
+    // (gravity + contact reaction). Skipping prevents the first-tick
+    // case where a_CoM=0 (no prev) drives full-magnitude per-part
+    // flex residuals that overshoot before damping engages.
+    constexpr int kAbaWarmupTicks = 5;
+    static std::unordered_map<uint32_t, int> s_tick_count;
 
     const JPH::BodyLockInterfaceNoLock& lock_iface = system.GetBodyLockInterfaceNoLock();
     const float inv_dt = (fixed_dt > 1e-6f) ? (1.0f / fixed_dt) : 0.0f;
@@ -102,6 +126,19 @@ void TreeRegistry::RunAbaPass(
         tree.last_a_body = body_rot_inv * a_world;
         tree.last_alpha  = body_rot_inv * alpha_world;
 
+        // Skip the actual flex integration during warm-up so finite-diff
+        // gathers history. RNEA still works (it reads last_a_body etc.,
+        // which are now populated), but flex stays at rest for these
+        // initial ticks.
+        int& tc = s_tick_count[body_id];
+        if (tc < kAbaWarmupTicks) {
+            ++tc;
+            // Drain accumulator anyway — RunAdvisoryPass would otherwise
+            // see stale ext_force from before warm-up ended.
+            // (Actually RunAdvisoryPass drains itself, so leave alone.)
+            continue;
+        }
+
         RunAbaForwardStep(tree,
             tree.last_v_body, tree.last_omega,
             tree.last_a_body, tree.last_alpha,
@@ -129,15 +166,28 @@ void TreeRegistry::ApplyFlexToBodies(
         if (it == registry.end()) continue;
         JPH::BodyID jph_id = it->second;
 
-        positions.resize(n);
-        rotations.resize(n);
-        for (size_t i = 0; i < n; ++i) {
-            positions[i] = tree.nodes[i].com_local + tree.flex[i].delta_pos;
-            rotations[i] = tree.flex[i].delta_rot;
+        // Skip the work entirely when no part has any flex to apply.
+        // Avoids wasted ModifyShapes / NotifyShapeChanged work for
+        // rigid vessels (and during the ABA warm-up). Threshold is
+        // tight (sub-millimeter / sub-degree) — anything larger is
+        // worth pushing to Jolt.
+        bool any_flex = false;
+        for (size_t i = 1; i < n; ++i) {
+            const PartFlex& f = tree.flex[i];
+            if (f.delta_pos.LengthSq() > 1.0e-8f
+                || std::fabs(f.delta_rot.GetX()) > 1.0e-4f
+                || std::fabs(f.delta_rot.GetY()) > 1.0e-4f
+                || std::fabs(f.delta_rot.GetZ()) > 1.0e-4f)
+            {
+                any_flex = true;
+                break;
+            }
         }
+        if (!any_flex) continue;
 
         // Mutate the compound shape under a write lock. The body's
         // shape pointer is only mutable through this path.
+        bool modified = false;
         {
             JPH::BodyLockWrite lock(lock_iface, jph_id);
             if (!lock.Succeeded()) continue;
@@ -147,16 +197,50 @@ void TreeRegistry::ApplyFlexToBodies(
 
             auto* mc = const_cast<JPH::MutableCompoundShape*>(
                 static_cast<const JPH::MutableCompoundShape*>(shape));
-            if (mc->GetNumSubShapes() != n) {
-                // SubShape ↔ part_idx alignment broken (e.g., topology
-                // changed but rebuild hasn't run). Skip rather than
-                // index out of bounds.
+            const uint num_sub = mc->GetNumSubShapes();
+            // Mapping check: SubShapeMap should have been set with one
+            // entry per SubShape. If absent or mismatched, skip — better
+            // to leave the body rigid than apply wrong flex per shape.
+            if (tree.subshape_to_part.size() != num_sub) {
                 continue;
             }
-            mc->ModifyShapes(0, n,
+
+            // First pass: capture the post-AdjustCenterOfMass rest
+            // positions so subsequent ticks can apply flex deltas to
+            // a stable reference (otherwise reading GetPositionCOM
+            // each tick yields the PREVIOUS tick's modified pos and
+            // flex accumulates instead of overwriting).
+            if (!tree.rest_captured) {
+                tree.rest_subshape_pos.resize(num_sub);
+                tree.rest_subshape_rot.resize(num_sub);
+                for (uint i = 0; i < num_sub; ++i) {
+                    tree.rest_subshape_pos[i] = mc->GetSubShape(i).GetPositionCOM();
+                    tree.rest_subshape_rot[i] = mc->GetSubShape(i).GetRotation();
+                }
+                tree.rest_captured = true;
+            }
+
+            positions.resize(num_sub);
+            rotations.resize(num_sub);
+            for (uint i = 0; i < num_sub; ++i) {
+                const uint16_t part_idx = tree.subshape_to_part[i];
+                if (part_idx >= n) {
+                    // Stale mapping (post-rebuild); fall back to rest.
+                    positions[i] = tree.rest_subshape_pos[i];
+                    rotations[i] = tree.rest_subshape_rot[i];
+                    continue;
+                }
+                const PartFlex& f = tree.flex[part_idx];
+                positions[i] = tree.rest_subshape_pos[i] + f.delta_pos;
+                rotations[i] = f.delta_rot * tree.rest_subshape_rot[i];
+            }
+            mc->ModifyShapes(0, num_sub,
                 positions.data(), rotations.data(),
                 sizeof(JPH::Vec3), sizeof(JPH::Quat));
+            modified = true;
         }
+
+        if (!modified) continue;
 
         // NotifyShapeChanged refits the broadphase AABB + invalidates
         // narrow-phase contact cache for this body. Pass DontActivate

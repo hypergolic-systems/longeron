@@ -57,12 +57,18 @@ namespace Longeron.Native
                 &outLen,
                 dt);
 
+            // Reset input buffer regardless of success — otherwise a
+            // single failure compounds: next tick's records get appended
+            // to the un-parsed half of the failed tick's records, and
+            // every subsequent tick fails for the same reason.
+            int len = _input.Length;
+            _input.Reset();
+
             if (rc != 0)
                 throw new InvalidOperationException(
-                    $"longeron_step failed (rc={rc}, requested output bytes={(ulong)outLen})");
+                    $"longeron_step failed (rc={rc}, input bytes={len}, output bytes={(ulong)outLen})");
 
             _output.OnStepReturned((int)(ulong)outLen);
-            _input.Reset();
         }
 
         public void Dispose()

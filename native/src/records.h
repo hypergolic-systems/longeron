@@ -42,6 +42,12 @@ enum class RecordType : uint8_t {
                              //   part_idx tags the force with the originating part's tree index
                              //   (0xFFFF = unattributed) so Phase 4 RNEA can subtract the per-part
                              //   external wrench from the inertial wrench.
+    SubShapeMap       = 14,  // u32 body_id, u16 sub_shape_count, u16 part_idx[count].
+                             //   Maps each SubShape in the body's compound shape to a part
+                             //   index in the corresponding VesselTree. Phase 5 ABA uses this
+                             //   to apply per-part flex transforms to all sub-shapes belonging
+                             //   to a part (preserving Phase 4's multi-collider-per-part
+                             //   layout for Jolt's auto-CoM math).
     VesselTreeUpdate  = 13,  // u32 vessel_body_id, u16 part_count,
                              //   part_count × {
                              //     u16 parent_idx (0xFFFF = root), float mass,

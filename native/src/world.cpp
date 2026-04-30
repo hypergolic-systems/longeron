@@ -806,6 +806,17 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
     mTreeRegistry.Upsert(body_id, std::move(nodes), std::move(compliance));
 }
 
+void LongeronWorld::HandleSubShapeMap(const uint8_t*& cur, const uint8_t* end) {
+    const uint32_t body_id = Read<uint32_t>(cur, end);
+    const uint16_t count   = Read<uint16_t>(cur, end);
+    std::vector<uint16_t> map;
+    map.reserve(count);
+    for (uint16_t i = 0; i < count; ++i) {
+        map.push_back(Read<uint16_t>(cur, end));
+    }
+    mTreeRegistry.SetSubShapeMap(body_id, std::move(map));
+}
+
 void LongeronWorld::HandleSetBodyGroup(const uint8_t*& cur, const uint8_t* end) {
     const uint32_t user_id = Read<uint32_t>(cur, end);
     const uint32_t group_id = Read<uint32_t>(cur, end);
@@ -952,6 +963,7 @@ int32_t LongeronWorld::Step(
         const uint8_t tag = *cur++;
         switch (static_cast<RecordType>(tag)) {
         case RecordType::VesselTreeUpdate:  HandleVesselTreeUpdate(cur, end); break;
+        case RecordType::SubShapeMap:       HandleSubShapeMap(cur, end); break;
         case RecordType::BodyCreate:        HandleBodyCreate(cur, end); break;
         case RecordType::BodyDestroy:       HandleBodyDestroy(cur, end); break;
         case RecordType::SetGravity:        HandleSetGravity(cur, end); break;
@@ -965,9 +977,10 @@ int32_t LongeronWorld::Step(
         case RecordType::SetBodyGroup:      HandleSetBodyGroup(cur, end); break;
         case RecordType::MassUpdate:        HandleMassUpdate(cur, end); break;
         default:
-            // Unknown / unsupported in Phase 1 — abort to avoid mis-
-            // parsing the remainder of the stream.
-            return -3;
+            // Unknown / unsupported tag — abort to avoid mis-parsing
+            // the remainder of the stream. Encode the bad tag in the
+            // return code so the C# side can log it: rc = -3000 - tag.
+            return -3000 - static_cast<int32_t>(tag);
         }
     }
 

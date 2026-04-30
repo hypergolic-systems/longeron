@@ -82,6 +82,7 @@ private:
     void HandleSetBodyGroup(const uint8_t*& cur, const uint8_t* end);
     void HandleMassUpdate(const uint8_t*& cur, const uint8_t* end);
     void HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* end);
+    void HandleSubShapeMap(const uint8_t*& cur, const uint8_t* end);
 
     // -- Output emission ----------------------------------------------
     void EmitBodyPoses();

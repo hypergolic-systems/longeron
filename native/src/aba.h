@@ -64,8 +64,12 @@ void RunAbaForwardStep(
     JPH::Vec3 alpha,
     float fixed_dt);
 
-// Number of internal substeps per Jolt physics tick.
-inline constexpr int kAbaSubsteps = 10;
+// Number of internal substeps per Jolt physics tick. With Phase 5.0
+// stiffness (kStiffnessScale=5×, kLinAngRatio=5) the highest natural
+// freq is around ω_n ≈ 100 rad/s; semi-implicit Euler is stable when
+// dt × ω < 2, so dt < 20 ms is fine. We substep at 20× → 1 ms substep
+// → comfortable 5× margin.
+inline constexpr int kAbaSubsteps = 20;
 
 } // namespace longeron
 

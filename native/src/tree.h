@@ -119,6 +119,26 @@ struct VesselTree {
     // forward pass; consumed by RNEA / ModifyShapes / PartPose emit.
     std::vector<PartFlex> flex;
 
+    // SubShape rest positions in the body's CoM frame (after Jolt's
+    // MutableCompoundShape::AdjustCenterOfMass auto-shifts at create
+    // time). Lazily populated on first ApplyFlexToBodies pass and then
+    // used as the immutable rest reference for ModifyShapes:
+    //   subshape_pos[i] = rest_subshape_pos[i] + delta_pos[part_for_subshape[i]]
+    //   subshape_rot[i] = delta_rot[part_for_subshape[i]] · rest_subshape_rot[i]
+    // Without this, reading the compound's CURRENT SubShape position
+    // each tick (which equals the prior tick's modified position)
+    // would feed the flex offset into rest, accumulating drift.
+    bool                   rest_captured = false;
+    std::vector<JPH::Vec3> rest_subshape_pos;
+    std::vector<JPH::Quat> rest_subshape_rot;
+
+    // SubShape index → part_idx mapping. A part may have multiple
+    // colliders; each becomes its own SubShape, but they all share the
+    // same flex transform. Sent by C# via SubShapeMap right after
+    // BodyCreate. If empty, ApplyFlexToBodies treats each SubShape as
+    // its own part (legacy / ABA disabled fallback).
+    std::vector<uint16_t> subshape_to_part;
+
     // Last tick's body-frame kinematic state. Filled by RunAbaPass
     // (finite-diff vs previous tick); reused by RunAdvisoryPass for
     // the inertial wrench decomposition. Avoids a second finite-diff.
@@ -205,6 +225,12 @@ public:
 
     // Drop a vessel's tree (called on BodyDestroy).
     void Erase(uint32_t body_id);
+
+    // Set the SubShape→part_idx mapping for a body's compound shape.
+    // Called when SubShapeMap input arrives. The body may not yet have
+    // a tree (the VesselTreeUpdate may come later); we lazily create
+    // a tree-only entry to hold the mapping.
+    void SetSubShapeMap(uint32_t body_id, std::vector<uint16_t>&& subshape_to_part);
 
     // Add an external force record into the per-part accumulator for
     // RNEA subtraction. World-frame force + point are converted to

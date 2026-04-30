@@ -97,27 +97,23 @@ namespace Longeron.Integration
                 new Vector3d(rootRbAngVel.x, rootRbAngVel.y, rootRbAngVel.z));
 
             var subShapes = new List<SubShape>(64);
+            var subShapeToPart = new List<ushort>(64);
             outPartOffsets.Clear();
 
             // Phase 5 ABA: walk parts in BFS order (matching
-            // EmitVesselTree) and emit EXACTLY ONE SubShape per part so
-            // sub_shape_index == part_idx in the tree. The ABA forward
-            // pass writes per-part poses by index via
-            // MutableCompoundShape::ModifyShape on this aligned mapping.
-            //
-            // v1 limitation (TODO): multi-collider parts (Mk1 pod hatch,
-            // some engines, fairings) lose their secondary colliders —
-            // only the first usable collider on each part participates.
-            // For collision fidelity on those parts, build an inner
-            // StaticCompoundShape per part as a Phase 5.x extension.
-            // Parts with no usable collider get a tiny sphere placeholder
-            // so the index alignment holds.
+            // EmitVesselTree) so the per-shape part_idx is the BFS
+            // index. Each part may emit MULTIPLE SubShapes — one per
+            // valid collider — preserving Phase 4's mass distribution
+            // for Jolt's auto-CoM computation. ABA's ModifyShapes
+            // applies the same flex transform to every SubShape that
+            // shares a part_idx (see native side's subShapeToPart map).
             var bfsOrder = ListPartsBfs(vessel.rootPart);
+            ushort partIdx = 0;
             foreach (var part in bfsOrder)
             {
-                if (part == null) continue;
+                if (part == null) { partIdx++; continue; }
                 var partXform = part.transform;
-                if (partXform == null) continue;
+                if (partXform == null) { partIdx++; continue; }
 
                 // Record this part's offset from root, captured in
                 // root-local space and frozen until the next rebuild.
@@ -128,11 +124,9 @@ namespace Longeron.Integration
                 };
                 outPartOffsets[part] = offset;
 
-                // Find this part's first usable collider; project into
-                // ROOT-local space so the shape's pose is in the body's
-                // anchor frame.
-                SubShape sub = default;
-                bool found = false;
+                // Walk this part's colliders and project them into
+                // ROOT-local space so all sub-shapes share a single
+                // body frame.
                 var colliders = part.GetComponentsInChildren<Collider>(includeInactive: true);
                 foreach (var col in colliders)
                 {
@@ -142,40 +136,40 @@ namespace Longeron.Integration
                     if (col.gameObject == null || !col.gameObject.activeInHierarchy) continue;
                     if (col.GetType().Name == "WheelCollider") continue;  // Phase 3.5
 
-                    if (TryClassify(col, rootXform, out sub))
+                    if (TryClassify(col, rootXform, out var sub))
                     {
-                        found = true;
-                        break;
+                        subShapes.Add(sub);
+                        subShapeToPart.Add(partIdx);
                     }
                 }
-                if (!found)
-                {
-                    // Tiny placeholder so SubShape index aligns with
-                    // part BFS index. Located at the part's CoM in
-                    // root-local space; 1 cm sphere is small enough to
-                    // never trigger meaningful contact for parts that
-                    // wouldn't have had collision anyway.
-                    sub.Kind = ShapeKind.Sphere;
-                    sub.PosX = offset.LocalPos.x;
-                    sub.PosY = offset.LocalPos.y;
-                    sub.PosZ = offset.LocalPos.z;
-                    sub.RotX = 0f; sub.RotY = 0f; sub.RotZ = 0f; sub.RotW = 1f;
-                    sub.P0 = 0.01f;
-                }
-                subShapes.Add(sub);
+                partIdx++;
             }
 
             if (subShapes.Count == 0)
             {
-                Debug.Log(LogPrefix + $"vessel '{vessel.vesselName}' has no parts — skipping body");
+                Debug.Log(LogPrefix + $"vessel '{vessel.vesselName}' has no usable colliders — skipping body");
                 return false;
             }
 
             if (subShapes.Count > 255)
             {
-                Debug.LogWarning(LogPrefix + $"vessel '{vessel.vesselName}' has {subShapes.Count} parts, capping at 255 (ABA index alignment will fail beyond this)");
+                Debug.LogWarning(LogPrefix + $"vessel '{vessel.vesselName}' has {subShapes.Count} colliders, capping at 255");
                 subShapes.RemoveRange(255, subShapes.Count - 255);
+                subShapeToPart.RemoveRange(255, subShapeToPart.Count - 255);
             }
+
+            // Phase 5 diag: log spawn position + initial velocity on
+            // every body create so we can correlate post-decouple
+            // surprise trajectories with what the bridge was actually
+            // told. Remove once decouple flow stabilizes.
+            Debug.Log(LogPrefix + string.Format(
+                "spawn '{0}' root='{1}' rootWorld=({2:F2},{3:F2},{4:F2}) altWorld={5:F2} rb.vel=({6:F2},{7:F2},{8:F2}) |v|={9:F2}",
+                vessel.vesselName,
+                root.partInfo != null ? root.partInfo.name : root.name,
+                rootXform.position.x, rootXform.position.y, rootXform.position.z,
+                rootXform.position.y,
+                rootRbVel.x, rootRbVel.y, rootRbVel.z,
+                rootRbVel.magnitude));
 
             input.BeginBodyCreate(
                 handle, bodyType, layer,
@@ -190,6 +184,12 @@ namespace Longeron.Integration
 
             foreach (var sub in subShapes)
                 AppendSubShape(input, sub);
+
+            // Phase 5 ABA: SubShape→part_idx so the native side can
+            // apply each part's flex transform to every collider that
+            // belongs to it. Sent right after BodyCreate so the
+            // ordering matches the per-shape iteration order.
+            input.WriteSubShapeMap(handle, subShapeToPart.ToArray());
 
             return true;
         }

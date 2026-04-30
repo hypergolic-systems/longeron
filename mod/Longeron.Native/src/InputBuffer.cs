@@ -27,6 +27,7 @@ namespace Longeron.Native
         ConstraintCreateFixedAt = 11,
         ForceAtPosition   = 12,
         VesselTreeUpdate  = 13,
+        SubShapeMap       = 14,
 
         // Output-only:
         BodyPose          = 64,
@@ -662,6 +663,31 @@ namespace Longeron.Native
                 *(float*)p  = node.CLin;          p += 4;
                 *(float*)p  = node.KAng;          p += 4;
                 *(float*)p  = node.CAng;          p += 4;
+            }
+            _len += kSize;
+        }
+
+        /// <summary>
+        /// Send a SubShape→part_idx mapping for a vessel body so Phase 5
+        /// ABA can apply per-part flex transforms to every collider
+        /// belonging to that part (multi-collider parts share one
+        /// flex). Layout: tag(1) + body_id(4) + count(2) + count × u16.
+        /// Send right after BodyCreate; the mapping is keyed by the
+        /// body and persists until BodyDestroy.
+        /// </summary>
+        public void WriteSubShapeMap(BodyHandle body, ushort[] subShapeToPart)
+        {
+            int n = subShapeToPart != null ? subShapeToPart.Length : 0;
+            int kSize = 1 + 4 + 2 + n * 2;
+            EnsureCapacity(kSize);
+            byte* p = _ptr + _len;
+            *p++ = (byte)RecordType.SubShapeMap;
+            *(uint*)p = body.Id;            p += 4;
+            *(ushort*)p = (ushort)n;        p += 2;
+            for (int i = 0; i < n; ++i)
+            {
+                *(ushort*)p = subShapeToPart[i];
+                p += 2;
             }
             _len += kSize;
         }

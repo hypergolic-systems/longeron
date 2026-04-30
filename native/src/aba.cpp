@@ -226,6 +226,36 @@ void RunAbaForwardStep(
             f.delta_rot = IntegrateRotation(f.delta_rot, f.ang_vel, dt);
         }
     }
+
+    // Phase 5.0 safety clamp — if flex blew up beyond reasonable bounds
+    // (joint anchor moved > 1 m, or angular velocity > 50 rad/s), log
+    // once per vessel and reset that part's flex to rest. This catches
+    // numerical instability before it propagates to KSP's orbit reset.
+    // TODO (Phase 5.x): remove once implicit-Euler integration is in
+    // place and we trust stability fully.
+    constexpr float kMaxLinearFlexM   = 1.0f;
+    constexpr float kMaxAngVelRad     = 50.0f;
+    constexpr float kMaxLinVelMs      = 100.0f;
+    static int s_clamp_log_count = 0;
+    for (size_t i = 1; i < n; ++i) {
+        PartFlex& f = tree.flex[i];
+        const float pos_mag = f.delta_pos.Length();
+        const float lv_mag  = f.lin_vel.Length();
+        const float av_mag  = f.ang_vel.Length();
+        if (pos_mag > kMaxLinearFlexM || lv_mag > kMaxLinVelMs || av_mag > kMaxAngVelRad
+            || !std::isfinite(pos_mag) || !std::isfinite(lv_mag) || !std::isfinite(av_mag))
+        {
+            if (s_clamp_log_count < 8) {
+                s_clamp_log_count++;
+                JPH::Trace("[aba/clamp] part_idx=%zu reset: |dp|=%.2f |lv|=%.2f |av|=%.2f",
+                           i, pos_mag, lv_mag, av_mag);
+            }
+            f.delta_pos = JPH::Vec3::sZero();
+            f.delta_rot = JPH::Quat::sIdentity();
+            f.lin_vel   = JPH::Vec3::sZero();
+            f.ang_vel   = JPH::Vec3::sZero();
+        }
+    }
 }
 
 } // namespace longeron
