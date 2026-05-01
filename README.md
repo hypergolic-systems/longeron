@@ -167,58 +167,6 @@ is patched out entirely; Jolt's double precision is the replacement.
 [FloatingOrigin](https://en.wikipedia.org/wiki/Floating_origin) keeps
 working for Unity rendering, but doesn't touch Jolt.
 
-## Why Pinocchio, not a hand-written ABA
-
-An early Longeron iteration shipped a custom forward integrator in
-tree — "ABA-style" was the honest description, but the state
-representation was wrong (per-link rotation in vessel frame with
-`q_joint` derived each substep, which broke kinematic propagation
-of parent rotation to children). The symptom was visible in-game:
-gimbaling an engine caused engine-position oscillation and
-uncontrolled vessel roll.
-
-The fix was canonical reduced-coord Featherstone ABA — joint state
-flips to per-edge `(q_joint, ω_joint)`, child rotation derived by
-composition with the parent — which we evaluated against
-[Pinocchio v3.9.0](https://github.com/stack-of-tasks/pinocchio).
-Pinocchio is a battle-tested ABA implementation used in robotics
-research; analytic single-pendulum gates (equilibrium / period /
-critical damping) passed on first compile. Writing it ourselves
-would have been error-prone (we already saw what one wrong state
-representation cost us) and bought nothing — there is exactly one
-correct implementation of Featherstone ABA, and one already exists.
-
-The deployment cost — what we actually had to pay to vendor a
-robotics library into a KSP mod — was kept manageable: header-only
-Pinocchio + LTO + `-Wl,-dead_strip_dylibs` + `strip -x` collapses
-the artifact to a 1.5 MB single-arch dylib with only `libc++` and
-`libSystem` runtime deps (no Boost runtime, no precompiled
-Pinocchio shared library, despite Pinocchio depending on Boost at
-build time). The Eigen-vs-Jolt math conversion (Pinocchio uses
-Eigen's `(linear; angular)` spatial-vector convention; we use
-`(angular; linear)`) lives in two helpers in `aba.cpp`. Per-vessel
-`pinocchio::Model` is built once per topology change, keyed by a
-globally-monotonic version counter, and reused across ticks.
-
-Two correctness invariants from getting Pinocchio integrated:
-
-1. `model.gravity.setZero()` at model build — Pinocchio's default
-   `model.gravity = (0, 0, −9.81)` adds gravity to every body's
-   equations of motion on top of any user-supplied `fext`, but
-   we already account for gravity upstream (Jolt body's
-   acceleration finite-diff feeds the inertial-wrench subtraction;
-   per-part lift / drag / thrust come in via the external-wrench
-   accumulator). Without `setZero`, gravity is double-counted —
-   ~0.1 rad of ghost deflection per body in the multi-link test
-   gates.
-2. Globally-monotonic topology version, not per-tree. The
-   per-vessel `Model` cache is module-static (keyed by `body_id`)
-   while each `World` has its own `TreeRegistry`; a per-tree
-   `++version` would collide at version=1 across separately-built
-   test rigs that recycled `body_id`s, and Pinocchio would silently
-   reuse a stale `Model` with wrong joint placements. A
-   TU-level static counter sidesteps this.
-
 ## Approach
 
 Per-`FixedUpdate`, the runtime pipeline is:
