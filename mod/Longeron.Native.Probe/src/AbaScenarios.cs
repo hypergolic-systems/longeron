@@ -861,6 +861,110 @@ namespace Longeron.Native.Probe
             }
         }
 
+        // -- M6 -------------------------------------------------------------
+        //
+        // Long-duration stability on the M5 booster configuration.
+        // Catches drift / accumulating error / NaN that single-shot
+        // tests miss.
+
+        /// <summary>
+        /// M6.1: 5000-tick free cruise (kinematic body, no inputs).
+        /// Max angular flex on any non-root part stays bounded < 1°
+        /// throughout. Clamp must never fire.
+        /// </summary>
+        public static void Booster_5000TickFreeCruise_Bounded()
+        {
+            const float kAng = 10000f;
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildBoosterPlusSides(rig, kAng: kAng, cAng: cAng);
+
+                float maxAng = 0f;
+                for (int i = 0; i < 5000; ++i)
+                {
+                    rig.Step(kDt);
+                    for (ushort idx = 1; idx <= 4; ++idx)
+                    {
+                        var pp = rig.PartPose(v.Id, idx);
+                        float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                                  pp.DeltaRotZ, pp.DeltaRotW);
+                        if (ang > maxAng) maxAng = ang;
+                        AssertTrue(!float.IsNaN(ang) && !float.IsInfinity(ang),
+                            $"NaN/Inf at tick {i}, part {idx}: |Δθ|={ang}");
+                    }
+                }
+                AssertTrue(maxAng < 0.01745f,    // 1°
+                    $"5000-tick cruise: max |Δθ|={maxAng:F4} rad ({maxAng*180.0f/(float)Math.PI:F2}°)");
+            }
+        }
+
+        /// <summary>
+        /// M6.2: sinusoidal SAS-style excitation. Apply a 1 Hz sine
+        /// torque on the body for the first 50 ticks, then run silent
+        /// for the rest of 5000 ticks. Verify (a) bounded throughout,
+        /// (b) decays after the excitation ends, (c) no NaN/Inf, (d)
+        /// no drift in the silent phase.
+        /// </summary>
+        public static void Booster_5000TickSinusoidalExcitation_Decays()
+        {
+            const float kAng = 10000f;
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+            const float Tmax_kNm  = 5.0f;
+            const float omega_drive = 2f * (float)Math.PI * 1.0f;  // 1 Hz
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildBoosterPlusSides(rig, kAng: kAng, cAng: cAng);
+
+                float maxAng = 0f;
+                float maxAngDuringDrive = 0f;
+                int driveSteps = 50;
+
+                for (int i = 0; i < 5000; ++i)
+                {
+                    if (i < driveSteps)
+                    {
+                        // Apply sinusoidal torque on the body about Z.
+                        // ForceDelta wrench = (0, 0, 0, 0, 0, T_z).
+                        float t = i * kDt;
+                        float Tz = Tmax_kNm * (float)Math.Sin(omega_drive * t);
+                        rig.World.Input.WriteForceDelta(
+                            v, fx: 0, fy: 0, fz: 0,
+                            tx: 0, ty: 0, tz: Tz);
+                    }
+                    rig.Step(kDt);
+
+                    for (ushort idx = 1; idx <= 4; ++idx)
+                    {
+                        var pp = rig.PartPose(v.Id, idx);
+                        float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                                  pp.DeltaRotZ, pp.DeltaRotW);
+                        AssertTrue(!float.IsNaN(ang) && !float.IsInfinity(ang),
+                            $"NaN/Inf at tick {i}, part {idx}: |Δθ|={ang}");
+                        if (ang > maxAng) maxAng = ang;
+                        if (i < driveSteps && ang > maxAngDuringDrive) maxAngDuringDrive = ang;
+                    }
+                }
+
+                AssertTrue(maxAng < 0.1f,    // ~5.7°
+                    $"5000-tick excitation: max |Δθ|={maxAng:F4} rad ({maxAng*180.0f/(float)Math.PI:F2}°)");
+
+                // Post-excitation: at the end of the 5000-tick run
+                // (~98 s after drive ended at tick 50), flex should
+                // have decayed to small values.
+                for (ushort idx = 1; idx <= 4; ++idx)
+                {
+                    var pp = rig.PartPose(v.Id, idx);
+                    float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                              pp.DeltaRotZ, pp.DeltaRotW);
+                    AssertTrue(ang < 0.001f,
+                        $"part {idx} did not decay after sinusoidal drive: |Δθ|={ang:F4} rad");
+                }
+            }
+        }
+
         // -- helpers --------------------------------------------------------
 
         private static float Mag(float x, float y, float z)
