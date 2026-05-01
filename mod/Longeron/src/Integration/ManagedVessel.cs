@@ -44,6 +44,21 @@ namespace Longeron.Integration
         public List<Part> PartsByIdx { get; }
             = new List<Part>();
 
+        // SubShape index → part_idx (BFS) mapping. Parallel array to
+        // the SubShape stream sent in BodyCreate; populated alongside
+        // the WriteSubShapeMap call in ColliderWalker. Used by
+        // contact-report diag to translate native sub-shape ID to a
+        // Part name for "which collider hit" attribution.
+        public List<ushort> SubShapeMap { get; }
+            = new List<ushort>();
+
+        // Parallel to SubShapeMap: GameObject name of the source
+        // Unity collider for each sub-shape. Diagnostic-only — used
+        // by the contact log to identify which specific collider is
+        // touching, beyond just the part. Indexed the same way.
+        public List<string> SubShapeColliderNames { get; }
+            = new List<string>();
+
         // Last-seen part list, used to detect topology changes that
         // require a rebuild (decouple, dock, joint break, fairing
         // eject, structural failure).

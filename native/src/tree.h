@@ -140,16 +140,25 @@ struct VesselTree {
     // forward pass; consumed by RNEA / ModifyShapes / PartPose emit.
     std::vector<PartFlex> flex;
 
-    // SubShape rest positions in the body's CoM frame (after Jolt's
-    // MutableCompoundShape::AdjustCenterOfMass auto-shifts at create
-    // time). Lazily populated on first ApplyFlexToBodies pass and then
-    // used as the immutable rest reference for ModifyShapes:
+    // Pristine SubShape (pos, rot) as supplied to
+    // MutableCompoundShape::AddShape at BodyCreate time — the natural
+    // ORIGIN of each sub-shape in the compound's natural frame, not the
+    // CoM-relative position that Jolt then stores internally. We need
+    // these as the baseline for ModifyShapes, since Jolt's
+    // SetTransform applies its own  +inRotation·inner.CoM
+    // -compound.CoM transform to whatever inPosition we pass; using
+    // GetPositionCOM as the baseline (which an earlier version did)
+    // shifts every collider by `inner.CoM - compound.CoM` per tick.
+    //
+    // Populated by TreeRegistry::SetSubShapeRestPose, called from
+    // world.cpp HandleBodyCreate right after the C# wire-format
+    // sub-shape stream is parsed. Set once per body lifetime;
+    // topology rebuilds destroy + recreate the body with a fresh user_id
+    // so a new pristine stream comes in. Upsert deliberately does NOT
+    // clear these — the values bind to the compound shape, not the
+    // tree topology.
     //   subshape_pos[i] = rest_subshape_pos[i] + delta_pos[part_for_subshape[i]]
     //   subshape_rot[i] = delta_rot[part_for_subshape[i]] · rest_subshape_rot[i]
-    // Without this, reading the compound's CURRENT SubShape position
-    // each tick (which equals the prior tick's modified position)
-    // would feed the flex offset into rest, accumulating drift.
-    bool                   rest_captured = false;
     std::vector<JPH::Vec3> rest_subshape_pos;
     std::vector<JPH::Quat> rest_subshape_rot;
 
@@ -294,6 +303,18 @@ public:
     // a tree (the VesselTreeUpdate may come later); we lazily create
     // a tree-only entry to hold the mapping.
     void SetSubShapeMap(uint32_t body_id, std::vector<uint16_t>&& subshape_to_part);
+
+    // Store the pristine (pos, rot) values as supplied to
+    // MutableCompoundShape::AddShape for each SubShape in this body's
+    // compound. Called from HandleBodyCreate right after the wire-
+    // format sub-shape stream is parsed and before
+    // PhysicsSystem::AddBody. ApplyFlexToBodies uses these as the
+    // immutable rest baseline when calling ModifyShapes — see
+    // VesselTree::rest_subshape_pos for why. Like SetSubShapeMap,
+    // creates a stub tree entry if VesselTreeUpdate hasn't arrived yet.
+    void SetSubShapeRestPose(uint32_t body_id,
+                             std::vector<JPH::Vec3>&& rest_pos,
+                             std::vector<JPH::Quat>&& rest_rot);
 
     // Add an external force record into the per-part accumulator for
     // RNEA subtraction. World-frame force + point are converted to

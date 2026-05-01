@@ -48,6 +48,7 @@ public:
     // body's UserData. Returns 0 (Invalid) if the body was destroyed
     // mid-step or is unknown.
     uint32_t GetUserIdForBody(const JPH::Body& body) const;
+    uint32_t GetUserIdForBodyId(JPH::BodyID id) const;
 
     // Used by ContactSolveListenerImpl to convert per-tick impulse
     // (J = lambda × axis) into force (J / dt) when routing contact
@@ -65,7 +66,7 @@ public:
     // worker threads, so output writes are protected by mOutputMutex.
     void AppendContactReport(uint32_t user_id_a, uint32_t user_id_b,
                              JPH::RVec3 point, JPH::Vec3 normal,
-                             float depth, float impulse);
+                             float depth, float impulse, uint16_t sub_shape_b);
 
 private:
     // -- Input handlers -----------------------------------------------

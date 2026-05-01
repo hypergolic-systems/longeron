@@ -57,6 +57,30 @@ namespace Longeron
         static readonly System.Collections.Generic.Dictionary<uint, string> _bodyNameCache =
             new System.Collections.Generic.Dictionary<uint, string>();
 
+        // Resolve a (vessel body, sub-shape index) pair to "partName/colliderName"
+        // for contact-diag output. Returns "?/?" if anything is missing.
+        static string ResolvePartForSubShape(uint bodyId, ushort subShapeIdx)
+        {
+            if (subShapeIdx == 0xFFFF) return "?/?";
+            if (!JoltPart.TryGet(bodyId, out var jp) || jp == null || jp.Part == null)
+                return "?/?";
+            var v = jp.Part.vessel;
+            if (v == null) return "?/?";
+            if (!SceneRegistry.TryGet(v, out var mv)) return "?/?";
+            if (mv.SubShapeMap == null || subShapeIdx >= mv.SubShapeMap.Count) return "?/?";
+            ushort partIdx = mv.SubShapeMap[subShapeIdx];
+            string partName = "?";
+            if (partIdx < mv.PartsByIdx.Count)
+            {
+                var part = mv.PartsByIdx[partIdx];
+                if (part != null && part.partInfo != null) partName = part.partInfo.name;
+            }
+            string colName = subShapeIdx < mv.SubShapeColliderNames.Count
+                ? mv.SubShapeColliderNames[subShapeIdx]
+                : "?";
+            return partName + "/" + colName;
+        }
+
         static string ResolveBodyName(uint handleId)
         {
             if (_bodyNameCache.TryGetValue(handleId, out var cached)) return cached;
@@ -205,16 +229,24 @@ namespace Longeron
                         break;
                     case RecordType.ContactReport:
                         world.Output.ReadContactReport(out var cr);
-                        // Diag: log contacts with body-identity resolution.
                         if (_contactDiagBudget > 0)
                         {
                             _contactDiagBudget--;
                             string nameA = ResolveBodyName(cr.BodyA.Id);
                             string nameB = ResolveBodyName(cr.BodyB.Id);
+                            string partOnB = ResolvePartForSubShape(cr.BodyB.Id, cr.SubShapeB);
+                            // Convert CB-frame contact point + normal to
+                            // Unity world for grep-ability. Point on body
+                            // A's surface; normal points A → B.
+                            Vector3d pointCb = new Vector3d(cr.PointX, cr.PointY, cr.PointZ);
+                            Vector3d pointWorld = frame.CbToWorld(pointCb);
+                            Vector3d normalCb = new Vector3d(cr.NormalX, cr.NormalY, cr.NormalZ);
+                            Vector3d normalWorld = frame.CbDirToWorld(normalCb);
                             Debug.Log("[Longeron/contact] a=" + cr.BodyA.Id + "(" + nameA
                                 + ") b=" + cr.BodyB.Id + "(" + nameB + ")"
-                                + " p=(" + cr.PointX.ToString("F3") + "," + cr.PointY.ToString("F3") + "," + cr.PointZ.ToString("F3")
-                                + ") n=(" + cr.NormalX.ToString("F3") + "," + cr.NormalY.ToString("F3") + "," + cr.NormalZ.ToString("F3")
+                                + " subB=" + cr.SubShapeB + "(" + partOnB + ")"
+                                + " worldPoint=(" + pointWorld.x.ToString("F3") + "," + pointWorld.y.ToString("F3") + "," + pointWorld.z.ToString("F3")
+                                + ") worldNormal=(" + normalWorld.x.ToString("F3") + "," + normalWorld.y.ToString("F3") + "," + normalWorld.z.ToString("F3")
                                 + ") depth=" + cr.Depth.ToString("F4") + " imp=" + cr.Impulse.ToString("F2"));
                         }
                         break;

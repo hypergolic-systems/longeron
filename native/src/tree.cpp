@@ -49,11 +49,14 @@ void TreeRegistry::Upsert(uint32_t body_id,
     zero_flex.ang_vel   = JPH::Vec3::sZero();
     t.flex.assign(t.nodes.size(), zero_flex);
 
-    // Rest-pose cache invalidated on topology rebuild; will be
-    // re-captured from the new compound shape on first ApplyFlexToBodies.
-    t.rest_captured = false;
-    t.rest_subshape_pos.clear();
-    t.rest_subshape_rot.clear();
+    // Don't touch t.rest_subshape_pos / t.rest_subshape_rot here.
+    // Those bind to the body's MutableCompoundShape — populated by
+    // SetSubShapeRestPose from HandleBodyCreate. Topology rebuilds
+    // destroy + recreate the body, which assigns a new user_id; this
+    // map entry's rest data is for whichever body owns this id now.
+    // Clearing here would either drop valid data (if SetSubShapeRestPose
+    // ran first in this batch) or churn through the same allocation
+    // an upcoming SetSubShapeRestPose would re-fill.
 
     // Reset finite-diff guard so the next RunAbaPass tick on this
     // tree skips the (v - prev_v)/dt computation. Without this, a
@@ -102,6 +105,17 @@ void TreeRegistry::SetSubShapeMap(uint32_t body_id, std::vector<uint16_t>&& subs
     VesselTree& t = mTrees[body_id];
     t.body_id = body_id;
     t.subshape_to_part = std::move(subshape_to_part);
+}
+
+void TreeRegistry::SetSubShapeRestPose(uint32_t body_id,
+                                       std::vector<JPH::Vec3>&& rest_pos,
+                                       std::vector<JPH::Quat>&& rest_rot) {
+    // Same lazy-stub pattern as SetSubShapeMap — BodyCreate fires
+    // this before VesselTreeUpdate.
+    VesselTree& t = mTrees[body_id];
+    t.body_id = body_id;
+    t.rest_subshape_pos = std::move(rest_pos);
+    t.rest_subshape_rot = std::move(rest_rot);
 }
 
 void TreeRegistry::RunAbaPass(
@@ -251,21 +265,6 @@ void TreeRegistry::ApplyFlexToBodies(
             // to leave the body rigid than apply wrong flex per shape.
             if (tree.subshape_to_part.size() != num_sub) {
                 continue;
-            }
-
-            // First pass: capture the post-AdjustCenterOfMass rest
-            // positions so subsequent ticks can apply flex deltas to
-            // a stable reference (otherwise reading GetPositionCOM
-            // each tick yields the PREVIOUS tick's modified pos and
-            // flex accumulates instead of overwriting).
-            if (!tree.rest_captured) {
-                tree.rest_subshape_pos.resize(num_sub);
-                tree.rest_subshape_rot.resize(num_sub);
-                for (uint i = 0; i < num_sub; ++i) {
-                    tree.rest_subshape_pos[i] = mc->GetSubShape(i).GetPositionCOM();
-                    tree.rest_subshape_rot[i] = mc->GetSubShape(i).GetRotation();
-                }
-                tree.rest_captured = true;
             }
 
             positions.resize(num_sub);

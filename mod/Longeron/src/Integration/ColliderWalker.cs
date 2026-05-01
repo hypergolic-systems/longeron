@@ -63,7 +63,9 @@ namespace Longeron.Integration
             float totalMassKg,
             uint groupId,
             CbFrame frame,
-            Dictionary<Part, ManagedVessel.PartOffset> outPartOffsets)
+            Dictionary<Part, ManagedVessel.PartOffset> outPartOffsets,
+            List<ushort> outSubShapeMap,
+            List<string> outSubShapeColliderNames)
         {
             if (vessel == null || vessel.rootPart == null) return false;
             var root = vessel.rootPart;
@@ -98,7 +100,10 @@ namespace Longeron.Integration
 
             var subShapes = new List<SubShape>(64);
             var subShapeToPart = new List<ushort>(64);
+            var subShapeColliderNames = new List<string>(64);
             outPartOffsets.Clear();
+            if (outSubShapeMap != null) outSubShapeMap.Clear();
+            if (outSubShapeColliderNames != null) outSubShapeColliderNames.Clear();
 
             // Phase 5 ABA: walk parts in BFS order (matching
             // EmitVesselTree) so the per-shape part_idx is the BFS
@@ -132,6 +137,7 @@ namespace Longeron.Integration
                 // every sub-shape (so per-part mass distributes
                 // proportionally to volume across its colliders).
                 _partSubsScratch.Clear();
+                _partSubColliderNamesScratch.Clear();
                 var colliders = part.GetComponentsInChildren<Collider>(includeInactive: true);
                 foreach (var col in colliders)
                 {
@@ -144,6 +150,7 @@ namespace Longeron.Integration
                     if (TryClassify(col, rootXform, out var sub))
                     {
                         _partSubsScratch.Add(sub);
+                        _partSubColliderNamesScratch.Add(col.gameObject.name);
                     }
                 }
 
@@ -168,6 +175,7 @@ namespace Longeron.Integration
                         sub.Density = density;
                         subShapes.Add(sub);
                         subShapeToPart.Add(partIdx);
+                        subShapeColliderNames.Add(_partSubColliderNamesScratch[i]);
                     }
                 }
                 // Spawn snapshot: log this part's transform pose and
@@ -249,6 +257,16 @@ namespace Longeron.Integration
             // belongs to it. Sent right after BodyCreate so the
             // ordering matches the per-shape iteration order.
             input.WriteSubShapeMap(handle, subShapeToPart.ToArray());
+            if (outSubShapeMap != null)
+            {
+                for (int i = 0; i < subShapeToPart.Count; ++i)
+                    outSubShapeMap.Add(subShapeToPart[i]);
+            }
+            if (outSubShapeColliderNames != null)
+            {
+                for (int i = 0; i < subShapeColliderNames.Count; ++i)
+                    outSubShapeColliderNames.Add(subShapeColliderNames[i]);
+            }
 
             return true;
         }
@@ -384,6 +402,9 @@ namespace Longeron.Integration
         // shapes so we can compute Σ volume → density before pushing
         // them onto the body's flat sub-shape stream. Cleared per part.
         static readonly List<SubShape> _partSubsScratch = new List<SubShape>(8);
+        // Parallel: collider GameObject names for the same per-part
+        // scratch entries. Used for contact-diag resolution.
+        static readonly List<string> _partSubColliderNamesScratch = new List<string>(8);
 
         // Sub-shape volume (m³ in part-local frame after lossyScale
         // bake). Used by WriteBodyForVessel to compute per-part

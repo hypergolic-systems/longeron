@@ -126,6 +126,10 @@ namespace Longeron.Native
         public float  NormalX, NormalY, NormalZ;
         public float  Depth;
         public float  Impulse;
+        // Sub-shape index on body B (the dynamic vessel). 0xFFFF means
+        // non-compound shape or decode failure. Use SubShapeMap on the
+        // ManagedVessel to translate to a part_idx and then a Part.
+        public ushort SubShapeB;
     }
 
     /// <summary>
@@ -325,20 +329,21 @@ namespace Longeron.Native
 
         public void ReadContactReport(out ContactReportRecord record)
         {
-            const int kPayload = 52;  // a(4) + b(4) + point(24) + normal(12) + depth(4) + impulse(4)
+            const int kPayload = 54;  // a(4) + b(4) + point(24) + normal(12) + depth(4) + impulse(4) + subB(2)
             EnsureBytes(kPayload);
             byte* p = _ptr + _cursor;
             record = default;
-            record.BodyA   = new BodyHandle(*(uint*)p);   p += 4;
-            record.BodyB   = new BodyHandle(*(uint*)p);   p += 4;
-            record.PointX  = *(double*)p;                 p += 8;
-            record.PointY  = *(double*)p;                 p += 8;
-            record.PointZ  = *(double*)p;                 p += 8;
-            record.NormalX = *(float*)p;                  p += 4;
-            record.NormalY = *(float*)p;                  p += 4;
-            record.NormalZ = *(float*)p;                  p += 4;
-            record.Depth   = *(float*)p;                  p += 4;
-            record.Impulse = *(float*)p;                  p += 4;
+            record.BodyA     = new BodyHandle(*(uint*)p);   p += 4;
+            record.BodyB     = new BodyHandle(*(uint*)p);   p += 4;
+            record.PointX    = *(double*)p;                 p += 8;
+            record.PointY    = *(double*)p;                 p += 8;
+            record.PointZ    = *(double*)p;                 p += 8;
+            record.NormalX   = *(float*)p;                  p += 4;
+            record.NormalY   = *(float*)p;                  p += 4;
+            record.NormalZ   = *(float*)p;                  p += 4;
+            record.Depth     = *(float*)p;                  p += 4;
+            record.Impulse   = *(float*)p;                  p += 4;
+            record.SubShapeB = *(ushort*)p;                 p += 2;
             _cursor += kPayload;
         }
 

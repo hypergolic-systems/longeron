@@ -38,6 +38,8 @@ namespace Longeron.Integration
         // Reused per-call to avoid allocations on the hot path.
         static readonly Dictionary<Part, ManagedVessel.PartOffset> _offsetScratch =
             new Dictionary<Part, ManagedVessel.PartOffset>(64);
+        static readonly List<ushort> _subShapeScratch = new List<ushort>(64);
+        static readonly List<string> _subShapeColliderNamesScratch = new List<string>(64);
 
         public static void MarkDirty(Vessel v)
         {
@@ -145,7 +147,7 @@ namespace Longeron.Integration
                 input, newHandle, v,
                 BodyType.Dynamic, Layer.Kinematic,
                 totalMass, mv.GroupId,
-                frame, _offsetScratch);
+                frame, _offsetScratch, _subShapeScratch, _subShapeColliderNamesScratch);
             if (!ok)
             {
                 Debug.LogWarning(LogPrefix + $"vessel '{v.vesselName}' produced no usable colliders; skipping body create");
@@ -164,6 +166,12 @@ namespace Longeron.Integration
             foreach (var p in current) mv.LastParts.Add(p);
             mv.PartOffsets.Clear();
             foreach (var kv in _offsetScratch) mv.PartOffsets[kv.Key] = kv.Value;
+            mv.SubShapeMap.Clear();
+            for (int i = 0; i < _subShapeScratch.Count; ++i)
+                mv.SubShapeMap.Add(_subShapeScratch[i]);
+            mv.SubShapeColliderNames.Clear();
+            for (int i = 0; i < _subShapeColliderNamesScratch.Count; ++i)
+                mv.SubShapeColliderNames.Add(_subShapeColliderNamesScratch[i]);
             mv.LastMass = totalMass;
 
             var root = v.rootPart;

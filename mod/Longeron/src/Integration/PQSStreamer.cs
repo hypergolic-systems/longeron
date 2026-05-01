@@ -68,10 +68,17 @@ namespace Longeron.Integration
                 if (pqs == null) continue;
 
                 if (TryInjectMod(pqs))
-                {
                     pqsAttached++;
-                    SweepExistingQuads(pqs);
-                }
+                // Always sweep, even if our mod was already injected
+                // from a previous flight scene. PQS quads are pooled
+                // by PQSCache and survive scene transitions, but our
+                // QuadBody MonoBehaviours are destroyed when we
+                // dispose the world. Without a fresh sweep, any quad
+                // that wasn't re-built since last time has no JoltBody
+                // mirror — and OnQuadBuilt won't fire for already-
+                // built pooled quads, so the live tree-walk is the
+                // only way to catch them.
+                SweepExistingQuads(pqs);
             }
 
             Debug.Log(LogPrefix + string.Format(

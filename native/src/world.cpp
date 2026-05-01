@@ -222,13 +222,20 @@ uint32_t LongeronWorld::GetUserIdForBody(const JPH::Body& body) const {
     return static_cast<uint32_t>(body.GetUserData());
 }
 
+uint32_t LongeronWorld::GetUserIdForBodyId(JPH::BodyID id) const {
+    const JPH::BodyLockInterfaceNoLock& lock = mPhysicsSystem.GetBodyLockInterfaceNoLock();
+    const JPH::Body* body = lock.TryGetBody(id);
+    return body != nullptr ? static_cast<uint32_t>(body->GetUserData()) : 0u;
+}
+
 void LongeronWorld::AppendContactReport(
     uint32_t user_id_a, uint32_t user_id_b,
     JPH::RVec3 point, JPH::Vec3 normal,
-    float depth, float impulse)
+    float depth, float impulse, uint16_t sub_shape_b)
 {
-    // tag(1) + a(4) + b(4) + point(24 doubles) + normal(12) + depth(4) + impulse(4) = 53
-    constexpr size_t kSize = 53;
+    // tag(1) + a(4) + b(4) + point(24 doubles) + normal(12) + depth(4)
+    //   + impulse(4) + subShapeB(2) = 55
+    constexpr size_t kSize = 55;
     if (!ReserveOutput(kSize)) return;
 
     uint8_t* p = mOutputBuffer + mOutputLen;
@@ -247,6 +254,7 @@ void LongeronWorld::AppendContactReport(
     Write(p, normal.GetX()); Write(p, normal.GetY()); Write(p, normal.GetZ());
     Write(p, depth);
     Write(p, impulse);
+    Write(p, sub_shape_b);
     mOutputLen += kSize;
 }
 
@@ -573,6 +581,23 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
 
     mBodyRegistry.emplace(user_id, id);
     mNeedsBroadphaseOptimize = true;
+
+    // Hand the pristine sub-shape (pos, rot) to TreeRegistry so
+    // ApplyFlexToBodies has the immutable rest baseline for
+    // ModifyShapes. Only dynamic bodies use MutableCompoundShape /
+    // run ABA flex; static + kinematic skip.
+    if (needs_mutable) {
+        std::vector<JPH::Vec3> rest_pos;
+        std::vector<JPH::Quat> rest_rot;
+        rest_pos.reserve(subs.size());
+        rest_rot.reserve(subs.size());
+        for (const auto& s : subs) {
+            rest_pos.push_back(s.pos);
+            rest_rot.push_back(s.rot);
+        }
+        mTreeRegistry.SetSubShapeRestPose(
+            user_id, std::move(rest_pos), std::move(rest_rot));
+    }
 }
 
 void LongeronWorld::HandleBodyDestroy(const uint8_t*& cur, const uint8_t* end) {
