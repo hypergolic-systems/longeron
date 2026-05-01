@@ -447,6 +447,72 @@ JPH::Vec3 TranslateTorque(JPH::Vec3 torque_at_com, JPH::Vec3 com, JPH::Vec3 atta
 
 } // namespace
 
+// -----------------------------------------------------------------------
+// RNEA backward pass — design note (2026-04-30)
+// -----------------------------------------------------------------------
+//
+// We keep our own RNEA implementation here rather than calling
+// `pinocchio::rnea`, even though Pinocchio's forward pass (`aba`) is now
+// the forward-dynamics provider in `aba.cpp`. Pinocchio does provide a
+// backward pass that populates `data.f[i]` (per-edge transmitted wrench)
+// — but a direct swap is **not equivalent** to what this code does, for
+// one specific reason:
+//
+//   Pinocchio's rnea is **fixed-base**: it only sees the chain motion,
+//   not the vessel body's motion (a_body, ω, α). For us, the chain is
+//   the per-part flex relative to the vessel body, while the vessel
+//   body itself is integrated by Jolt and has non-trivial acceleration
+//   under thrust / gravity / contacts.
+//
+// Our `F_self[i] = m·a_part − ext_force[i]` (below) where
+// `a_part = a_body + α×r + ω×(ω×r)` captures the inertial wrench
+// contribution from rigid-body acceleration of the vessel as a whole.
+// That contribution is what makes a heavy booster on a small joint
+// transmit `M_above · a_body` worth of force during a high-G burn —
+// the load that drives joint break detection. Pinocchio fixed-base
+// doesn't know about a_body and would underestimate this wrench by
+// exactly that amount.
+//
+// Three real options were considered:
+//
+//   1. **Floating-base Pinocchio model** (true equivalence). Replace
+//      the fixed-base `JointModelSpherical` chain with a `JointModelFreeFlyer`
+//      at the root + spherical joints below. Set the floater's q/v/a
+//      from Jolt each tick; rnea then sees vessel motion and `data.f[i]`
+//      is correct. But the forward pass (`aba` in aba.cpp) also has to
+//      handle the floating base — we can't just discard the base accel
+//      ABA computes because chain dynamics depend on it. Needs
+//      constrained-dynamics or a workaround. Substantial refactor
+//      (~2-3 days, with risk to the now-stable forward pass).
+//
+//   2. **Hybrid** — keep the F_self inertial-decomposition here, build
+//      per-body fext from it, run `pinocchio::rnea` to do only the
+//      chain summation. Replaces the backward-sweep loop (~30 LOC)
+//      with a Pinocchio call + frame conversion (~20 LOC). Modest LOC
+//      saving; doesn't really unify math vendors since the inertial
+//      physics still lives in our wrapper.
+//
+//   3. **Status quo** — keep this implementation. It's tested,
+//      drives working break detection, and is consistent with what the
+//      forward pass needs. Cost: two implementations of overlapping
+//      spatial-vector algebra (`spatial.h` is used here but no longer
+//      by aba.cpp).
+//
+// Decision: option 3 for now. The forward-pass swap to Pinocchio is
+// the change that earned us the win (battle-tested ABA, cleaner code).
+// The backward pass already works and break detection isn't a known
+// pain point. Re-evaluate if/when joint-break behaviour gets attention
+// or floating-base becomes desirable for other reasons.
+//
+// One thing to track: this code shares a known imperfection with the
+// forward pass — neither applies per-part gravity in `tree.ext_force`.
+// Gravity flows through Jolt into a_body; the F_self formula picks
+// it up via the inertial term. For static (launchpad) and steady-thrust
+// scenarios the resulting joint wrenches match real physics; for a
+// truly free-falling vessel they show spurious compression equal to
+// `M_above · g` at each joint. Per-part gravity would fix both passes.
+// -----------------------------------------------------------------------
+
 bool TreeRegistry::RunAdvisoryPass(
     const JPH::PhysicsSystem& system,
     const std::unordered_map<uint32_t, JPH::BodyID>& registry,
