@@ -367,12 +367,19 @@ namespace Longeron.Integration
         // also creates a thrust-feedback runaway: as the engine
         // flexes angularly under thrust, the thrust direction tilts
         // in body frame → lateral force grows → more flex → divergence.
-        // Stable when K_ang > F_thrust × engine_lever ≈ 100 kN·m/rad
-        // for typical engines; needs ~10× margin for transient damping.
-        // 30× stock = 1800 kN·m/rad on size-1 stack → 18× margin.
-        // Equilibrium under heavy load stays at ~1-3° (visible flex
-        // on radial decouplers etc., near-rigid stack joints).
-        const float kStiffnessScale = 30f;
+        // Near-welded stiffness: K is sized so that even at the
+        // breaking-force threshold, joint angular deflection stays
+        // under ~1°. For breakingTorque ~100 kN·m and 1° = 0.017 rad,
+        // K_required ≈ 100 / 0.017 ≈ 6000 kN·m/rad on a size-1 stack.
+        // That's ~33× the prior 180 kN·m/rad (kStiffnessScale=30),
+        // so kStiffnessScale = 1000 puts us in that regime. Stiff
+        // joints + cumulative chain effect (4-part stack has 3 joints
+        // in series, lateral offset at the leaf grows with chain
+        // length × Σθ_i) is what lets the leaf engine stay visually
+        // attached to its parent during normal flight. ω_n = √(K/I)
+        // ≈ 110 rad/s for I≈0.5 t·m²; substep dt = 1ms gives margin
+        // ~6× critical-stable for explicit Euler.
+        const float kStiffnessScale = 1000f;
 
         // Damping ratio (fraction of critical). 1.0 = critical (fastest
         // non-overshoot decay). Super-critical (>1) introduces a fast

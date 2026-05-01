@@ -1148,6 +1148,86 @@ namespace Longeron.Native.Probe
             }
         }
 
+        // -- M5.6 (in-game lateral-dislocation regression) ------------------
+        //
+        // User reported: in-game FlightTest under axial spin, the
+        // tank tilts modestly (centrifugal stress on a slight CoM
+        // offset) but the engine *doesn't follow* — it remains near
+        // its rest position in the stack, leaving a visible gap
+        // between bottom-of-tank and top-of-engine.
+        //
+        // For Pinocchio's reduced-coord chain with rigid spherical
+        // joints (translation pinned at anchors), this should be
+        // impossible: when a parent joint q tilts, the child's joint
+        // anchor MUST move with it (oMi[child].translation =
+        // oMi[parent].translation + oMi[parent].rotation ·
+        // (placement.translation)). The child's CoM moves with its
+        // joint anchor.
+        //
+        // This test forces a non-trivial parent joint deflection and
+        // asserts the leaf's delta_pos reflects it.
+
+        public static void VerticalStack4_ParentTilt_LeafFollows()
+        {
+            // Soft K to make the parent tilt observable. Realistic
+            // K_ang = 200 from TopologyReconciler.
+            const float kAng = 200f;
+            float cAng = 0.1f * 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+            const float Fx_kN = 5f;             // lateral force on tank
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildVerticalStack4(rig, kAng: kAng, cAng: cAng);
+
+                // Apply sustained lateral force on the TANK (idx 2),
+                // attributed at its CoM. Settles into a steady tilt.
+                for (int i = 0; i < 200; ++i)
+                {
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: Fx_kN, fy: 0, fz: 0,
+                        px: 0, py: 100 + 2.5, pz: 0,    // tank CoM in world
+                        partIdx: 2);
+                    rig.Step(kDt);
+                }
+
+                // After settle, examine each part's delta:
+                //   - parachute (idx 1): some tilt, some position offset.
+                //   - tank      (idx 2): more tilt (it's the loaded part).
+                //   - engine    (idx 3): cumulative tilt + position.
+                //
+                // The KEY CHECK: engine's delta_pos reflects the
+                // chain's cumulative bend, NOT zero. Specifically,
+                // engine's lateral X displacement should be ≥ the
+                // tank's lateral X displacement (because it's
+                // FURTHER along the chain).
+                var pp_tank   = rig.PartPose(v.Id, 2);
+                var pp_engine = rig.PartPose(v.Id, 3);
+
+                float tank_lateral   = (float)Math.Sqrt(
+                    pp_tank.DeltaPosX * pp_tank.DeltaPosX +
+                    pp_tank.DeltaPosZ * pp_tank.DeltaPosZ);
+                float engine_lateral = (float)Math.Sqrt(
+                    pp_engine.DeltaPosX * pp_engine.DeltaPosX +
+                    pp_engine.DeltaPosZ * pp_engine.DeltaPosZ);
+
+                // Tank should have non-trivial deflection from 5 kN
+                // lateral at this K. Engine must have AT LEAST that
+                // (cumulative on a longer lever arm).
+                AssertTrue(tank_lateral > 1e-3f,
+                    $"setup didn't produce tank tilt: tank lateral |Δp|={tank_lateral:E2}");
+                AssertTrue(engine_lateral >= tank_lateral,
+                    $"engine NOT following tank tilt: tank lateral={tank_lateral:F4} m, " +
+                    $"engine lateral={engine_lateral:F4} m " +
+                    $"(engine should be ≥ tank because it's downstream in the chain)");
+
+                // Also: signs should match. If tank tilted +X, engine
+                // should be displaced +X (same direction).
+                AssertTrue(Math.Sign(pp_engine.DeltaPosX) == Math.Sign(pp_tank.DeltaPosX) ||
+                           Math.Abs(pp_engine.DeltaPosX) < 1e-6f,
+                    $"engine displaced opposite to tank: tank ΔX={pp_tank.DeltaPosX:F4}, engine ΔX={pp_engine.DeltaPosX:F4}");
+            }
+        }
+
         // -- helpers --------------------------------------------------------
 
         private static float Mag(float x, float y, float z)
