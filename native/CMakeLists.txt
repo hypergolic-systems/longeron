@@ -214,10 +214,18 @@ if(LONGERON_HAS_PINOCCHIO)
     # the serialization templates; we don't instantiate any of those, so
     # nm reports zero undefined Boost symbols and the load command is
     # pure dead weight at runtime.
+    #
+    # -undefined dynamic_lookup lets the link succeed even if Boost libs
+    # for the target arch aren't installed (e.g., x86_64 cross-build for
+    # KSP on an arm64 Mac with arm64-only brew). LTO + -dead_strip
+    # eliminate the references before the linker sees them, so this is
+    # purely an escape hatch — the resulting dylib has no runtime Boost
+    # dep (verified via `otool -L` and `nm -u`).
     if(APPLE)
         target_link_options(longeron_native PRIVATE
             -Wl,-dead_strip
-            -Wl,-dead_strip_dylibs)
+            -Wl,-dead_strip_dylibs
+            -Wl,-undefined,dynamic_lookup)
     endif()
 
     # Strip local symbols from the final dylib. The header-only Pinocchio

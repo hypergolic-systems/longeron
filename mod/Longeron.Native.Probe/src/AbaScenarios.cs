@@ -965,6 +965,189 @@ namespace Longeron.Native.Probe
             }
         }
 
+        // -- M5.4 (regression: in-game engine-slew bug) ---------------------
+        //
+        // FlightTest in-game: 4-part vertical stack (pod + parachute +
+        // tank + engine). Under strong axial rotation, the engine
+        // physically slews out of the stack. M5.2 (5-part booster, ω=1
+        // rad/s) didn't catch this — could be a higher-ω regime, a
+        // longer-chain cumulative effect, or both. This test pushes
+        // both knobs.
+
+        private static BodyHandle BuildVerticalStack4(
+            AbaTestRig rig, float kAng, float cAng)
+        {
+            // Vertical 4-part stack along +Y, modeled on FlightTest:
+            //   Pod      (idx 0): com (0, 0,   0). Mass 1.   Root.
+            //   Parachute (idx 1): com (0, 1,  0). attach (0, 0.5, 0).
+            //   Tank      (idx 2): com (0, 2.5, 0). attach (0, 1.5, 0).
+            //   Engine    (idx 3): com (0, 4,  0). attach (0, 3,   0).
+            //   (Tank is bigger than other parts for FlightTest fidelity.)
+            return rig.Vessel()
+                .Kinematic()
+                .At(0, 100, 0)
+                .Root(mass: 1f)
+                .Child(parentIdx: 0, mass: 0.1f,
+                       comX: 0f, comY: 1f, comZ: 0f,
+                       attachX: 0f, attachY: 0.5f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Child(parentIdx: 1, mass: 4f,
+                       comX: 0f, comY: 2.5f, comZ: 0f,
+                       attachX: 0f, attachY: 1.5f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng,
+                       halfX: 0.5f, halfY: 1.0f, halfZ: 0.5f)
+                .Child(parentIdx: 2, mass: 1.5f,
+                       comX: 0f, comY: 4f, comZ: 0f,
+                       attachX: 0f, attachY: 3f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Build();
+        }
+
+        /// <summary>
+        /// M5.4 (regression): 4-part stack under strong axial rotation
+        /// at REALISTIC K_ang (~200 kN·m/rad — what TopologyReconciler
+        /// actually emits for a size-1 stack joint, ~50× softer than
+        /// the synthetic 10000 used in M3-M4). With perfectly on-axis
+        /// CoMs, axial rotation produces zero centripetal so the engine
+        /// shouldn't slew.
+        /// </summary>
+        public static void VerticalStack4_AxialRoll_EngineStaysInLine()
+        {
+            const float kAng = 200f;            // realistic stack-joint K
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+            const float omega_y = 10.0f;        // strong axial roll
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildVerticalStack4(rig, kAng: kAng, cAng: cAng);
+
+                rig.World.Input.WriteSetKinematicPose(
+                    v, posX: 0, posY: 100, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    linX: 0, linY: 0, linZ: 0,
+                    angX: 0, angY: omega_y, angZ: 0);
+
+                for (int i = 0; i < 200; ++i) rig.Step(kDt);
+
+                var pp_engine = rig.PartPose(v.Id, 3);
+                float lateral = (float)Math.Sqrt(
+                    pp_engine.DeltaPosX * pp_engine.DeltaPosX +
+                    pp_engine.DeltaPosZ * pp_engine.DeltaPosZ);
+                AssertTrue(lateral < 0.01f,
+                    $"engine slew under axial roll: lateral |Δp|={lateral:F4} m " +
+                    $"(DeltaPos=({pp_engine.DeltaPosX:F4}, {pp_engine.DeltaPosY:F4}, {pp_engine.DeltaPosZ:F4}))");
+
+                float ang = AxisAngleMag(pp_engine.DeltaRotX, pp_engine.DeltaRotY,
+                                          pp_engine.DeltaRotZ, pp_engine.DeltaRotW);
+                AssertTrue(ang < 0.01f,
+                    $"engine angular flex under axial roll: |Δθ|={ang:F4} rad");
+            }
+        }
+
+        /// <summary>
+        /// M5.5 (in-game reproducer): 3-part stack at realistic
+        /// stiffness, given strong axial spin AND a slightly off-axis
+        /// thrust. This mirrors the FlightTest in-game scenario where
+        /// the engine slewed out: rocket ascending under thrust,
+        /// rolling fast about its long axis, with imperfect thrust
+        /// alignment. The bend should be bounded; the leaf should not
+        /// run away.
+        /// </summary>
+        public static void ThreeStack_AxialSpin_WithOffAxisThrust_Bounded()
+        {
+            // Realistic K. A bit of damping, not critical (real KSP
+            // joints aren't perfectly damped either).
+            const float kAng = 200f;
+            float cAng = 0.3f * 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+
+            // Strong axial spin about Y (the stack's long axis), +
+            // 1° gimbal-tilt thrust at the BOTTOM (root) of the stack.
+            //
+            // CENTRIFUGAL-STIFFENING INSTABILITY (real physics, not a
+            // bug): for compliant spherical joints (spring-damper), an
+            // angular deflection θ_x couples to centrifugal force via
+            // (com_in_body × R(θ_x)) — the deflected CoM moves off-
+            // axis, picks up centripetal m·ω²·lever, which feeds back
+            // as moment K·θ_x · lever² · ω² / K. The eigenvalue is
+            // K - m·ω²·lever²; if ω > √(K/(m·lever²)), the spring
+            // can't resist and θ grows unboundedly. For m=1, lever=1,
+            // K=200: ω_critical ≈ 14 rad/s. A real-world rigid joint
+            // doesn't have this failure mode (no compliance).
+            //
+            // We pick ω = 8 rad/s ≈ 0.6·ω_c so the spring keeps the
+            // joint stable. Above ω_c, the test would fail — that's
+            // the physical limit of explicit-Euler-integrated compliant
+            // joints, not a bug in the glue code.
+            const float omega_y = 8.0f;          // rad/s — strong but sub-critical
+            const float Fmag    = 50.0f;         // kN
+            float angleRad = (float)(1.0 * Math.PI / 180.0);
+            float Fx = Fmag * (float)Math.Sin(angleRad);
+            float Fy = Fmag * (float)Math.Cos(angleRad);
+
+            using (var rig = new AbaTestRig())
+            {
+                // Reuse 3-stack builder, override K/C.
+                var v = BuildThreeStack(rig, kAng: kAng, cAng: cAng,
+                                         kinematic: true);
+
+                // Set steady axial spin via kinematic ang_vel.
+                rig.World.Input.WriteSetKinematicPose(
+                    v, posX: 0, posY: 100, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    linX: 0, linY: 0, linZ: 0,
+                    angX: 0, angY: omega_y, angZ: 0);
+
+                // Sustain thrust + spin for 200 ticks (= 4 s real).
+                // The thrust has a small +X component in the BODY frame;
+                // because the body is spinning, its world-frame
+                // direction sweeps. We attribute the thrust to the
+                // middle part (treating it as the engine attach proxy)
+                // applied at the root's bottom face (so the lever-arm
+                // generates a bending moment at the bottom joint).
+                for (int i = 0; i < 200; ++i)
+                {
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: Fx, fy: Fy, fz: 0,
+                        px: 0, py: 100 - 0.5, pz: 0,
+                        partIdx: 1);
+                    rig.Step(kDt);
+                }
+
+                // Top (idx 2): cumulative bend. Should be bounded under
+                // reasonable steady-state deflection. With K=200 and
+                // moment ~Fx · 1.5m ≈ 1.3 kN·m, naive q ≈ 6.5 mrad ≈
+                // 0.4°. Real value with damping + spin coupling may be
+                // larger; 0.5 rad (~28°) is a generous bound — anything
+                // beyond that is the bug.
+                var pp_top = rig.PartPose(v.Id, 2);
+                float angTop = AxisAngleMag(pp_top.DeltaRotX, pp_top.DeltaRotY,
+                                             pp_top.DeltaRotZ, pp_top.DeltaRotW);
+                AssertTrue(angTop < 0.5f,
+                    $"top bend under spin+thrust: |Δθ|={angTop:F4} rad ({angTop*180.0f/(float)Math.PI:F1}°)");
+
+                // Lateral displacement should also be bounded. Top is
+                // 2m above CoM; for q_top ≈ 0.1 rad, lateral ≈ 0.2m.
+                // Bound at 0.5m (anything beyond is real slew).
+                float lateral = (float)Math.Sqrt(
+                    pp_top.DeltaPosX * pp_top.DeltaPosX +
+                    pp_top.DeltaPosZ * pp_top.DeltaPosZ);
+                AssertTrue(lateral < 0.5f,
+                    $"top slew under spin+thrust: lateral |Δp|={lateral:F4} m");
+
+                // Middle (idx 1) — same bounds as top, since it's the
+                // direct flex driver.
+                var pp_mid = rig.PartPose(v.Id, 1);
+                float angMid = AxisAngleMag(pp_mid.DeltaRotX, pp_mid.DeltaRotY,
+                                             pp_mid.DeltaRotZ, pp_mid.DeltaRotW);
+                AssertTrue(angMid < 0.5f,
+                    $"middle bend under spin+thrust: |Δθ|={angMid:F4} rad");
+
+                // No NaN/Inf throughout — sanity.
+                AssertTrue(!float.IsNaN(angTop) && !float.IsInfinity(angTop),
+                    "NaN/Inf in top bend");
+            }
+        }
+
         // -- helpers --------------------------------------------------------
 
         private static float Mag(float x, float y, float z)

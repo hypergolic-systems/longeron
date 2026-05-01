@@ -52,6 +52,8 @@ namespace Longeron.Native.Probe
             Run("M5.1 booster at rest under axial gravity",     AbaScenarios.Booster_AtRest_AxialGravity_Stable);
             Run("M5.2 booster steady rotation: side joints stay pinned", AbaScenarios.Booster_SteadyRotation_JointsStayPinned);
             Run("M5.3 booster gimbal offset thrust: bend bounded",       AbaScenarios.Booster_GimbalOffsetThrust_BendBounded);
+            Run("M5.4 4-stack axial roll @ realistic K: engine stays",   AbaScenarios.VerticalStack4_AxialRoll_EngineStaysInLine);
+            Run("M5.5 3-stack axial spin + off-axis thrust: bounded",    AbaScenarios.ThreeStack_AxialSpin_WithOffAxisThrust_Bounded);
             Run("M6.1 booster 5000-tick free cruise: bounded",           AbaScenarios.Booster_5000TickFreeCruise_Bounded);
             Run("M6.2 booster 5000-tick sinusoidal excitation: decays",  AbaScenarios.Booster_5000TickSinusoidalExcitation_Decays);
 
