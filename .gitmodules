@@ -2,3 +2,9 @@
 	path = native/third_party/JoltPhysics
 	url = https://github.com/hypergolic-systems/JoltPhysics.git
 	branch = longeron
+[submodule "native/third_party/eigen"]
+	path = native/third_party/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+[submodule "native/third_party/pinocchio"]
+	path = native/third_party/pinocchio
+	url = https://github.com/stack-of-tasks/pinocchio.git

@@ -12,7 +12,11 @@ native-build cmake_build_type="Release":
     set -euo pipefail
     cd native
     cmake -B build -DCMAKE_BUILD_TYPE={{cmake_build_type}}
-    cmake --build build --config {{cmake_build_type}} -j
+    # Pinocchio's template-heavy compilation uses 2-3 GB per parallel job;
+    # default `-j` would launch one per core and OOM on a 24 GB box. Cap to
+    # LONGERON_BUILD_JOBS (default 4) so peak RAM stays bounded. Override
+    # for fast machines with `LONGERON_BUILD_JOBS=8 just native-build`.
+    cmake --build build --config {{cmake_build_type}} -j ${LONGERON_BUILD_JOBS:-4}
 
 native-clean:
     rm -rf native/build

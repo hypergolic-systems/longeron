@@ -181,6 +181,14 @@ struct VesselTree {
     // an unrelated previous body that happened to share the same
     // body_id.
     bool has_prev_velocity = false;
+
+    // Monotonic counter, bumped by TreeRegistry::Upsert on every
+    // topology replacement. Pinocchio-backed ABA caches a per-vessel
+    // pinocchio::Model + Data sized to the part list; comparing this
+    // counter on each tick detects when the cache is stale and a model
+    // rebuild is needed. Plain uint64_t — no Pinocchio types leak into
+    // tree.h.
+    uint64_t topology_version = 0;
 };
 
 // Per-part diag record output by ABA each tick during the first

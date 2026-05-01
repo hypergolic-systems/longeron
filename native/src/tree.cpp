@@ -66,6 +66,7 @@ void TreeRegistry::Upsert(uint32_t body_id,
     t.last_a_body  = JPH::Vec3::sZero();
     t.last_alpha   = JPH::Vec3::sZero();
     t.diag_tick = 0;
+    ++t.topology_version;
 }
 
 void TreeRegistry::Erase(uint32_t body_id) {
