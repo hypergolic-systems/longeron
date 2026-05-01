@@ -264,16 +264,40 @@ bool LongeronWorld::ReserveOutput(size_t bytes) {
 // Build a single Jolt shape from a sub-shape record on the input
 // stream. Advances `cur`. Returns null Ref on failure (logged via
 // JPH::Trace which routes to the LongeronTrace handler).
+//
+// Per-sub-shape density (tonnes/m³ in KSP convention) is read after
+// the kind byte and applied via {Box,Sphere,ConvexHull}ShapeSettings
+// .mDensity. C# computes density = part_mass / Σ sub-shape volume so
+// the compound's auto-aggregation gives correct body mass / CoM /
+// inertia. Sentinel density == 0 falls through to the Jolt default
+// (1000 kg/m³ → 1 t/m³ in KSP units), used by static / convenience
+// wrappers that don't compute per-part density.
 static JPH::RefConst<JPH::Shape> BuildSubShape(const uint8_t*& cur, const uint8_t* end) {
     const uint8_t kind = Read<uint8_t>(cur, end);
+    const float density = Read<float>(cur, end);
+    const bool override_density = density > 0.0f;
     switch (static_cast<ShapeKind>(kind)) {
     case ShapeKind::Box: {
         const JPH::Vec3 half_extents = ReadFloat3(cur, end);
-        return JPH::RefConst<JPH::Shape>(new JPH::BoxShape(half_extents));
+        JPH::BoxShapeSettings settings(half_extents);
+        if (override_density) settings.SetDensity(density);
+        JPH::Shape::ShapeResult result = settings.Create();
+        if (result.HasError()) {
+            JPH::Trace("Box create failed: %s", result.GetError().c_str());
+            return JPH::RefConst<JPH::Shape>();
+        }
+        return result.Get();
     }
     case ShapeKind::Sphere: {
         const float radius = Read<float>(cur, end);
-        return JPH::RefConst<JPH::Shape>(new JPH::SphereShape(radius));
+        JPH::SphereShapeSettings settings(radius);
+        if (override_density) settings.SetDensity(density);
+        JPH::Shape::ShapeResult result = settings.Create();
+        if (result.HasError()) {
+            JPH::Trace("Sphere create failed: %s", result.GetError().c_str());
+            return JPH::RefConst<JPH::Shape>();
+        }
+        return result.Get();
     }
     case ShapeKind::ConvexHull: {
         const uint32_t raw_count = Read<uint32_t>(cur, end);
@@ -294,6 +318,7 @@ static JPH::RefConst<JPH::Shape> BuildSubShape(const uint8_t*& cur, const uint8_
             (void)ReadFloat3(cur, end);
         }
         JPH::ConvexHullShapeSettings settings(verts);
+        if (override_density) settings.SetDensity(density);
         JPH::Shape::ShapeResult result = settings.Create();
         if (result.HasError()) {
             JPH::Trace("ConvexHull create failed: %s", result.GetError().c_str());
@@ -308,7 +333,7 @@ static JPH::RefConst<JPH::Shape> BuildSubShape(const uint8_t*& cur, const uint8_
         // Used for streaming PQS terrain quads. Static-only — Jolt's
         // MeshShape isn't supported on Dynamic / Kinematic bodies
         // (Body::SetShape would assert), so the caller guarantees
-        // BodyType::Static.
+        // BodyType::Static. Density wire field is ignored.
         const uint32_t vertex_count = Read<uint32_t>(cur, end);
         JPH::VertexList verts;
         verts.reserve(vertex_count);
@@ -522,7 +547,16 @@ void LongeronWorld::HandleBodyCreate(const uint8_t*& cur, const uint8_t* end) {
     }
 
     if (motion_type == JPH::EMotionType::Dynamic) {
-        settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+        // Each sub-shape carries its part's density (set in C# from
+        // part_mass / Σ sub-shape volume), so CompoundShape's auto-
+        // aggregation already gives the correct mass distribution,
+        // CoM, and inertia. CalculateInertia preserves that
+        // distribution and rescales the total to `mass` — useful when
+        // a vessel has mass-bearing parts without colliders (their
+        // contribution is missing from the compound aggregate; the
+        // explicit total reconciles).
+        settings.mOverrideMassProperties =
+            JPH::EOverrideMassProperties::CalculateInertia;
         settings.mMassPropertiesOverride.mMass = mass;
     }
 
@@ -803,11 +837,13 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
 
     mTreeRegistry.Upsert(body_id, std::move(nodes), std::move(compliance));
 
-    // Phase 5 instability diagnostic: emit a one-shot CoM-offset
-    // comparison so the C# side can log Jolt's volume-weighted auto-CoM
-    // vs. the real mass-weighted CoM. Mismatch → body's gravity-from-
-    // each-part lever arms don't cancel → spurious body torque after
-    // every topology rebuild. See branch featherstone-aba notes.
+    // CoM regression check: with per-sub-shape density set by C# from
+    // part_mass / Σ sub-shape volume, Jolt's CompoundShape::
+    // GetCenterOfMass() should match the mass-weighted real CoM
+    // computed by ComputeRealCom from VesselTreeUpdate's per-part data.
+    // Non-trivial diff (>1cm) means the densities don't add up — likely
+    // a part with mass but no colliders, or the C# volume computation
+    // disagrees with Jolt's geometric integral.
     auto br_it = mBodyRegistry.find(body_id);
     if (br_it != mBodyRegistry.end()) {
         const JPH::BodyLockInterfaceNoLock& lock_iface =
@@ -819,6 +855,13 @@ void LongeronWorld::HandleVesselTreeUpdate(const uint8_t*& cur, const uint8_t* e
                 const JPH::Vec3 jolt_auto_com = shape->GetCenterOfMass();
                 const JPH::Vec3 real_com      = mTreeRegistry.ComputeRealCom(body_id);
                 const JPH::Vec3 diff          = real_com - jolt_auto_com;
+                if (diff.Length() > 0.01f) {
+                    JPH::Trace("BodyMassDiag: body=%u CoM mismatch %.3f m "
+                               "(jolt=(%.3f,%.3f,%.3f) real=(%.3f,%.3f,%.3f))",
+                               body_id, diff.Length(),
+                               jolt_auto_com.GetX(), jolt_auto_com.GetY(), jolt_auto_com.GetZ(),
+                               real_com.GetX(), real_com.GetY(), real_com.GetZ());
+                }
 
                 constexpr size_t kSize = 1 + 4 + 12 + 12 + 12;  // 41 bytes
                 if (ReserveOutput(kSize)) {

@@ -45,11 +45,50 @@ namespace Longeron
         static readonly System.Collections.Generic.Dictionary<uint, int> _bodyDiagTickCount =
             new System.Collections.Generic.Dictionary<uint, int>();
 
+        // Per-session contact-report log budget (diagnostic only).
+        // 3 s × 50 Hz × ~5 contact pairs = ~750. Bump to 2000 so the
+        // verbose-launch window captures every contact.
+        static int _contactDiagBudget = 2000;
+
+        // Resolve a Jolt body handle to a human-readable name for
+        // contact-report logging. Cached so repeated lookups during
+        // the contact-spammy verbose-launch window stay cheap; the
+        // cache is invalidated on world rebuild via NotifyWorldCreated.
+        static readonly System.Collections.Generic.Dictionary<uint, string> _bodyNameCache =
+            new System.Collections.Generic.Dictionary<uint, string>();
+
+        static string ResolveBodyName(uint handleId)
+        {
+            if (_bodyNameCache.TryGetValue(handleId, out var cached)) return cached;
+
+            string name = "?";
+            if (JoltPart.TryGet(handleId, out var jp) && jp != null && jp.Part != null)
+            {
+                var v = jp.Part.vessel;
+                name = "vessel:" + (v != null ? v.vesselName : "?");
+            }
+            else
+            {
+                foreach (var sb in Object.FindObjectsOfType<StaticBody>())
+                {
+                    if (sb != null && sb.Handle.Id == handleId)
+                    {
+                        name = "static:" + sb.gameObject.name;
+                        break;
+                    }
+                }
+            }
+            _bodyNameCache[handleId] = name;
+            return name;
+        }
+
         // Called by LongeronAddon when a new flight-scene world is
         // created so per-world transient state resets.
         internal void NotifyWorldCreated()
         {
             DiagLogger.Clear();
+            _bodyNameCache.Clear();
+            _contactDiagBudget = 2000;
         }
 
         public void FixedUpdate()
@@ -165,7 +204,19 @@ namespace Longeron
                         }
                         break;
                     case RecordType.ContactReport:
-                        world.Output.ReadContactReport(out _);
+                        world.Output.ReadContactReport(out var cr);
+                        // Diag: log contacts with body-identity resolution.
+                        if (_contactDiagBudget > 0)
+                        {
+                            _contactDiagBudget--;
+                            string nameA = ResolveBodyName(cr.BodyA.Id);
+                            string nameB = ResolveBodyName(cr.BodyB.Id);
+                            Debug.Log("[Longeron/contact] a=" + cr.BodyA.Id + "(" + nameA
+                                + ") b=" + cr.BodyB.Id + "(" + nameB + ")"
+                                + " p=(" + cr.PointX.ToString("F3") + "," + cr.PointY.ToString("F3") + "," + cr.PointZ.ToString("F3")
+                                + ") n=(" + cr.NormalX.ToString("F3") + "," + cr.NormalY.ToString("F3") + "," + cr.NormalZ.ToString("F3")
+                                + ") depth=" + cr.Depth.ToString("F4") + " imp=" + cr.Impulse.ToString("F2"));
+                        }
                         break;
                     case RecordType.AbaPartDiag:
                         world.Output.ReadAbaPartDiag(out var apd);
@@ -174,14 +225,15 @@ namespace Longeron
                             + "ext=({3:+0.0;-0.0},{4:+0.0;-0.0},{5:+0.0;-0.0})kN "
                             + "iner=({6:+0.0;-0.0},{7:+0.0;-0.0},{8:+0.0;-0.0})kN "
                             + "flex=({9:+0.0;-0.0},{10:+0.0;-0.0},{11:+0.0;-0.0})kN "
-                            + "dp=({12:+0.00;-0.00},{13:+0.00;-0.00},{14:+0.00;-0.00})m "
-                            + "dRot={15:F2}°",
+                            + "dp=({12:+0.0000;-0.0000},{13:+0.0000;-0.0000},{14:+0.0000;-0.0000})m |dp|={16:F4} "
+                            + "dRot={15:F4}°",
                             apd.Body.Id, apd.Tick, apd.PartIdx,
                             apd.ExtFX, apd.ExtFY, apd.ExtFZ,
                             apd.InertialFX, apd.InertialFY, apd.InertialFZ,
                             apd.FlexFX, apd.FlexFY, apd.FlexFZ,
                             apd.DeltaPosX, apd.DeltaPosY, apd.DeltaPosZ,
-                            apd.DeltaAngleRad * Mathf.Rad2Deg));
+                            apd.DeltaAngleRad * Mathf.Rad2Deg,
+                            Mathf.Sqrt(apd.DeltaPosX*apd.DeltaPosX + apd.DeltaPosY*apd.DeltaPosY + apd.DeltaPosZ*apd.DeltaPosZ)));
                         break;
                     case RecordType.BodyMassDiag:
                         world.Output.ReadBodyMassDiag(out var bmd);
@@ -485,6 +537,15 @@ namespace Longeron
                 rb.rotation        = partRot;
                 rb.velocity        = partVel;
                 rb.angularVelocity = angWorldF;
+                // With Physics.autoSimulation = false, Unity no longer
+                // syncs rb.position → transform.position at the end of
+                // the physics step (because the step doesn't run). The
+                // renderer reads transform.position, so without an
+                // explicit transform write the meshes would freeze in
+                // place while the rb pose advances. Write the transform
+                // directly to keep the renderer in sync.
+                part.transform.position = partPos;
+                part.transform.rotation = partRot;
 
                 jb.LastVelocity        = partVel;
                 jb.LastAngularVelocity = angWorldF;
@@ -495,14 +556,15 @@ namespace Longeron
                     Vector3 dVel = partVel - rbVelBefore;
                     Debug.Log("[Longeron/unity-part] " + string.Format(
                         "body={0} t={1} part={2} '{3}' "
-                        + "compute_pos=({4:F2},{5:F2},{6:F2}) "
-                        + "rb_pos_pre=({7:F2},{8:F2},{9:F2}) "
-                        + "Δpos=({10:+0.00;-0.00},{11:+0.00;-0.00},{12:+0.00;-0.00}) "
+                        + "compute_pos=({4:F4},{5:F4},{6:F4}) "
+                        + "rb_pos_pre=({7:F4},{8:F4},{9:F4}) "
+                        + "Δpos=({10:+0.0000;-0.0000},{11:+0.0000;-0.0000},{12:+0.0000;-0.0000}) |Δp|={28:F4} "
                         + "compute_vel=({13:F2},{14:F2},{15:F2}) "
                         + "rb_vel_pre=({16:F2},{17:F2},{18:F2}) "
                         + "Δvel=({19:+0.00;-0.00},{20:+0.00;-0.00},{21:+0.00;-0.00}) "
-                        + "PartLocal=({22:F2},{23:F2},{24:F2}) "
-                        + "FlexLocal=({25:F2},{26:F2},{27:F2})",
+                        + "PartLocal=({22:F4},{23:F4},{24:F4}) "
+                        + "FlexLocal=({25:F4},{26:F4},{27:F4}) "
+                        + "FlexRot=({29:F4},{30:F4},{31:F4},{32:F4}) flexAngDeg={33:F2}",
                         pose.Body.Id, diagTickIdx, jb.PartIdx,
                         part.partInfo != null ? part.partInfo.name : part.name,
                         partPos.x, partPos.y, partPos.z,
@@ -512,7 +574,10 @@ namespace Longeron
                         rbVelBefore.x, rbVelBefore.y, rbVelBefore.z,
                         dVel.x, dVel.y, dVel.z,
                         jb.PartLocalPos.x, jb.PartLocalPos.y, jb.PartLocalPos.z,
-                        jb.FlexLocalPos.x, jb.FlexLocalPos.y, jb.FlexLocalPos.z));
+                        jb.FlexLocalPos.x, jb.FlexLocalPos.y, jb.FlexLocalPos.z,
+                        dPos.magnitude,
+                        jb.FlexLocalRot.x, jb.FlexLocalRot.y, jb.FlexLocalRot.z, jb.FlexLocalRot.w,
+                        Quaternion.Angle(Quaternion.identity, jb.FlexLocalRot)));
                 }
             }
         }

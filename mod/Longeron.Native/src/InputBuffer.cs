@@ -144,6 +144,7 @@ namespace Longeron.Native
         //          + shape_count(u8)
         //          + shape_count × {
         //              sub_pos(float3=12) + sub_rot(float4=16) + kind(u8)
+        //              + density(4)
         //              + kind-specific params (Box: 12, Sphere: 4,
         //                ConvexHull: 4 + 12·N)
         //            }
@@ -153,6 +154,16 @@ namespace Longeron.Native
         // to seed dynamic vessel bodies on goOffRails (unpack from
         // rails); static / kinematic ignore (kinematic motion comes
         // from SetKinematicPose).
+        //
+        // density (per sub-shape, tonnes/m³ in KSP convention) lets
+        // each part contribute its real mass distribution to the
+        // compound's auto-computed CoM and inertia. C# computes
+        // density = part_mass / part_total_volume so all sub-shapes of
+        // a single part share one density; CompoundShape's
+        // GetMassProperties() aggregates correctly via parallel-axis.
+        // Sentinel density == 0 means "use Jolt default 1000" (legacy
+        // / convenience-wrapper path; mass on BodyCreate is then taken
+        // as the explicit override via CalculateInertia).
         //
         // group_id semantics: 0 = collide with everything (terrain,
         // synthetic ground, anything outside any vessel). Non-zero =
@@ -219,10 +230,11 @@ namespace Longeron.Native
         public void AppendShapeBox(
             float subPosX, float subPosY, float subPosZ,
             float subRotX, float subRotY, float subRotZ, float subRotW,
-            float halfX, float halfY, float halfZ)
+            float halfX, float halfY, float halfZ,
+            float density = 0f)
         {
-            // sub_pos(12) + sub_rot(16) + kind(1) + half_extents(12) = 41
-            const int kSize = 41;
+            // sub_pos(12) + sub_rot(16) + kind(1) + density(4) + half_extents(12) = 45
+            const int kSize = 45;
             EnsureCapacity(kSize);
             byte* p = _ptr + _len;
             *(float*)p = subPosX;           p += 4;
@@ -233,6 +245,7 @@ namespace Longeron.Native
             *(float*)p = subRotZ;           p += 4;
             *(float*)p = subRotW;           p += 4;
             *p++ = (byte)ShapeKind.Box;
+            *(float*)p = density;           p += 4;
             *(float*)p = halfX;             p += 4;
             *(float*)p = halfY;             p += 4;
             *(float*)p = halfZ;             p += 4;
@@ -242,10 +255,11 @@ namespace Longeron.Native
         public void AppendShapeSphere(
             float subPosX, float subPosY, float subPosZ,
             float subRotX, float subRotY, float subRotZ, float subRotW,
-            float radius)
+            float radius,
+            float density = 0f)
         {
-            // sub_pos(12) + sub_rot(16) + kind(1) + radius(4) = 33
-            const int kSize = 33;
+            // sub_pos(12) + sub_rot(16) + kind(1) + density(4) + radius(4) = 37
+            const int kSize = 37;
             EnsureCapacity(kSize);
             byte* p = _ptr + _len;
             *(float*)p = subPosX;           p += 4;
@@ -256,6 +270,7 @@ namespace Longeron.Native
             *(float*)p = subRotZ;           p += 4;
             *(float*)p = subRotW;           p += 4;
             *p++ = (byte)ShapeKind.Sphere;
+            *(float*)p = density;           p += 4;
             *(float*)p = radius;            p += 4;
             _len += kSize;
         }
@@ -270,15 +285,16 @@ namespace Longeron.Native
         public void AppendShapeConvexHull(
             float subPosX, float subPosY, float subPosZ,
             float subRotX, float subRotY, float subRotZ, float subRotW,
-            float[] vertices)
+            float[] vertices,
+            float density = 0f)
         {
             if (vertices == null || vertices.Length == 0 || (vertices.Length % 3) != 0)
                 throw new ArgumentException("vertices must be a non-empty xyz-packed array",
                                              nameof(vertices));
 
             uint vertCount = (uint)(vertices.Length / 3);
-            // sub_pos(12) + sub_rot(16) + kind(1) + count(4) + vertCount*12
-            int kSize = 33 + (int)vertCount * 12;
+            // sub_pos(12) + sub_rot(16) + kind(1) + density(4) + count(4) + vertCount*12 = 37 + 12N
+            int kSize = 37 + (int)vertCount * 12;
             EnsureCapacity(kSize);
             byte* p = _ptr + _len;
             *(float*)p = subPosX;           p += 4;
@@ -289,6 +305,7 @@ namespace Longeron.Native
             *(float*)p = subRotZ;           p += 4;
             *(float*)p = subRotW;           p += 4;
             *p++ = (byte)ShapeKind.ConvexHull;
+            *(float*)p = density;           p += 4;
             *(uint*)p = vertCount;          p += 4;
             for (int i = 0; i < vertices.Length; ++i)
             {
@@ -319,9 +336,9 @@ namespace Longeron.Native
 
             uint vertCount = (uint)(vertices.Length / 3);
             uint triCount  = (uint)(triangles.Length / 3);
-            // sub_pos(12) + sub_rot(16) + kind(1) + vert_count(4) + verts(12*N)
-            //   + tri_count(4) + tris(12*M)
-            int kSize = 33 + (int)vertCount * 12 + 4 + (int)triCount * 12;
+            // sub_pos(12) + sub_rot(16) + kind(1) + density(4) + vert_count(4) + verts(12*N)
+            //   + tri_count(4) + tris(12*M) = 37 + 12N + 4 + 12M
+            int kSize = 37 + (int)vertCount * 12 + 4 + (int)triCount * 12;
             EnsureCapacity(kSize);
             byte* p = _ptr + _len;
             *(float*)p = subPosX;           p += 4;
@@ -332,6 +349,9 @@ namespace Longeron.Native
             *(float*)p = subRotZ;           p += 4;
             *(float*)p = subRotW;           p += 4;
             *p++ = (byte)ShapeKind.TriangleMesh;
+            // TriangleMesh is static-only; density is meaningless. Pad
+            // the wire so all sub-shape records share the same prefix.
+            *(float*)p = 0f;                p += 4;
             *(uint*)p = vertCount;          p += 4;
             for (int i = 0; i < vertices.Length; ++i)
             {

@@ -19,8 +19,20 @@ enum class RecordType : uint8_t {
     // ---- Input records (C# → native) ----------------------------------
     ForceDelta        = 1,   // u32 user_id, double3 force, double3 torque (world-frame)
     MassUpdate        = 2,   // u32 user_id, float mass, float[6] inertia (Phase 2+)
-    BodyCreate        = 3,   // u32 user_id, u8 body_type, u8 shape_kind, shape params,
-                             // double3 pos, float4 rot, float mass, u8 layer
+    BodyCreate        = 3,   // u32 user_id, u8 body_type, u8 layer, u32 group_id,
+                             //   double3 pos, float4 rot, float mass (vessel total),
+                             //   float3 lin_v, float3 ang_v, u8 shape_count, sub-shapes…
+                             //   Each sub-shape carries float density (kg/m³) right
+                             //   after its kind byte. C# computes density =
+                             //   part_mass / Σ sub-shape volume so the per-part mass
+                             //   distributes proportionally to volume across that
+                             //   part's colliders; CompoundShape's GetMassProperties()
+                             //   then aggregates body mass / CoM / inertia from the
+                             //   per-sub-shape MassProperties. The header `mass` is
+                             //   used by CalculateInertia to rescale the aggregate
+                             //   total — important when mass-bearing parts have no
+                             //   colliders (their contribution is missing from the
+                             //   compound aggregate; the header reconciles).
     BodyDestroy       = 4,   // u32 user_id
     ConstraintCreate  = 5,   // Phase 2+
     ConstraintDestroy = 6,   // Phase 2+

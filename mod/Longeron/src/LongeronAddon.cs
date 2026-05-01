@@ -27,6 +27,18 @@ namespace Longeron
             var harmony = new Harmony(HarmonyId);
             harmony.PatchAll(typeof(LongeronAddon).Assembly);
 
+            // Take physics ownership: stop Unity's PhysX simulation step
+            // entirely. Jolt owns vessel motion and contact resolution;
+            // PhysX was leaking through as a depenetration writer on
+            // managed parts (engine collider being shoved up 30 cm
+            // every tick by PhysX's Unity-collider depenetration of the
+            // launchpad mesh, bypassing our Rigidbody.set_position
+            // hooks). Stateless queries (Physics.Raycast, etc.) keep
+            // working — disabling autoSimulation only suppresses the
+            // per-tick step, not the spatial queries.
+            Physics.autoSimulation = false;
+            Debug.Log(LogPrefix + "Physics.autoSimulation = false (Jolt owns physics)");
+
             string nativeVersion = World.NativeVersion;
             Debug.Log(LogPrefix + "loaded — Harmony patches installed. native bridge: " + nativeVersion);
 

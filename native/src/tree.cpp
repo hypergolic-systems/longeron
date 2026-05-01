@@ -235,6 +235,7 @@ void TreeRegistry::ApplyFlexToBodies(
         // Mutate the compound shape under a write lock. The body's
         // shape pointer is only mutable through this path.
         bool modified = false;
+        JPH::Vec3 old_com = JPH::Vec3::sZero();
         {
             JPH::BodyLockWrite lock(lock_iface, jph_id);
             if (!lock.Succeeded()) continue;
@@ -281,9 +282,21 @@ void TreeRegistry::ApplyFlexToBodies(
                 positions[i] = tree.rest_subshape_pos[i] + f.delta_pos;
                 rotations[i] = f.delta_rot * tree.rest_subshape_rot[i];
             }
+            // Capture the OLD CoM before mutating — handed to
+            // NotifyShapeChanged below so Jolt can shift the body's
+            // mPosition by `rotation × (new_com - old_com)` and keep
+            // the body anchor in the same world location.
+            old_com = mc->GetCenterOfMass();
             mc->ModifyShapes(0, num_sub,
                 positions.data(), rotations.data(),
                 sizeof(JPH::Vec3), sizeof(JPH::Quat));
+            // ModifyShapes does NOT recompute the compound's cached
+            // mCenterOfMass; AdjustCenterOfMass re-derives it from
+            // each sub-shape's MassProperties (which uses our per-
+            // sub-shape density). With per-part density, moving sub-
+            // shapes around shifts the body CoM — this is the whole
+            // point of letting Jolt own the aggregation.
+            mc->AdjustCenterOfMass();
             modified = true;
         }
 
@@ -295,28 +308,13 @@ void TreeRegistry::ApplyFlexToBodies(
         // `body.mPosition += rotation × (shape->GetCenterOfMass() -
         // inPreviousCenterOfMass)` to keep the body's anchor in the
         // same world location across CoM changes (Body.cpp::
-        // UpdateCenterOfMassInternal). For us the shape's CoM doesn't
-        // change between ModifyShapes calls (ModifyShape doesn't
-        // recompute mCenterOfMass), so passing the SAME value as the
-        // shape's current CoM gives a zero shift — which is what we
-        // want, since we're only moving sub-shapes, not the
-        // body-frame origin.
-        //
-        // Passing sZero (the bug we just fixed) caused the body to
-        // teleport by `rotation × shape.CoM` every tick once flex
-        // exceeded the any-flex threshold, manifesting as a constant
-        // ~1.5 m drift per tick perpendicular to gravity.
-        JPH::Vec3 com_now = JPH::Vec3::sZero();
-        {
-            JPH::BodyLockRead read_lock(lock_iface, jph_id);
-            if (read_lock.Succeeded()) {
-                const JPH::Shape* s = read_lock.GetBody().GetShape();
-                if (s != nullptr) com_now = s->GetCenterOfMass();
-            }
-        }
+        // UpdateCenterOfMassInternal). update_mass=true asks Jolt to
+        // also recompute the body's inertia tensor from the new
+        // shape mass distribution — required because flexing parts
+        // changes both the CoM and the inertia about it.
         body_iface.NotifyShapeChanged(jph_id,
-            /*old_com*/ com_now,
-            /*update_mass*/ false,
+            /*old_com*/ old_com,
+            /*update_mass*/ true,
             JPH::EActivation::DontActivate);
     }
 }

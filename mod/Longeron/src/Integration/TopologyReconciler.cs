@@ -125,7 +125,13 @@ namespace Longeron.Integration
                 }
             }
 
-            // Compute aggregate mass and emit a fresh body.
+            // Aggregate vessel mass for the BodyCreate header. Per-
+            // part density is computed inside ColliderWalker and
+            // attached to each AppendShape; Jolt's CompoundShape then
+            // aggregates mass / CoM / inertia from per-sub-shape
+            // MassProperties. The header mass is still useful as a
+            // safety override for parts that contribute mass without
+            // colliders (rare; CalculateInertia rescales to it).
             float totalMass = 0f;
             foreach (var p in current)
             {
@@ -183,6 +189,34 @@ namespace Longeron.Integration
             // Idempotently re-apply kinematic takeover for any newly-
             // unpacked rigidbodies that haven't been stamped yet.
             LongeronVesselModule.ApplyKinematicTakeover(v);
+
+            // Stock physics easing: at first registration, force gravity
+            // off (vessel.gravityMultiplier = 0), then let stock's
+            // VesselPrecalculate.CalculateGravity ramp it back to 1
+            // over ~16 ticks (easingFrameIncrease = 0.0625).
+            //
+            // Why we need this: stock's PutShipToGround places the
+            // vessel using world Y, which doesn't perfectly align with
+            // upAxis at the launchpad's location. The engine's lowest
+            // collider often spawns slightly INSIDE the launchpad mesh
+            // (~25cm penetration). With Physics.autoSimulation=false
+            // and no PhysX depenetration, gravity yanks the vessel
+            // through the pad faster than Jolt's iterative contact
+            // resolution can push it back out — vessel tunnels and
+            // ends up resting on the ground plane below the pad.
+            //
+            // The easing window gives Jolt 16 gravity-free ticks to
+            // resolve the spawn-time penetration, then gravity ramps
+            // in and the vessel rests cleanly on the actual pad.
+            // Stock's gravity force flows through FlightIntegrator's
+            // AddForce(integrationAccel) which is already pre-
+            // multiplied by gravityMultiplier — our RigidbodyForceHooks
+            // intercepts the scaled value, so no separate scaling is
+            // needed on our side.
+            if (firstTime && v.precalc != null)
+            {
+                v.precalc.isEasingGravity = true;
+            }
 
             // Send the vessel's spanning tree to the native RNEA pass
             // (Phase 4 advisory — logs per-edge transmitted wrench;

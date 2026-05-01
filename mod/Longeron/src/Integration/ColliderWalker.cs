@@ -126,7 +126,12 @@ namespace Longeron.Integration
 
                 // Walk this part's colliders and project them into
                 // ROOT-local space so all sub-shapes share a single
-                // body frame.
+                // body frame. We classify into the partSubs scratch
+                // so we can compute total volume across this part's
+                // sub-shapes once, then stamp the same density on
+                // every sub-shape (so per-part mass distributes
+                // proportionally to volume across its colliders).
+                _partSubsScratch.Clear();
                 var colliders = part.GetComponentsInChildren<Collider>(includeInactive: true);
                 foreach (var col in colliders)
                 {
@@ -138,8 +143,62 @@ namespace Longeron.Integration
 
                     if (TryClassify(col, rootXform, out var sub))
                     {
+                        _partSubsScratch.Add(sub);
+                    }
+                }
+
+                if (_partSubsScratch.Count > 0)
+                {
+                    // density (tonnes/m³) = part_mass / Σ sub-shape volume.
+                    // All sub-shapes of this part share the same density,
+                    // so per-sub-shape mass = sub_volume × density adds
+                    // back up to part_mass, with the volume-weighted CoM
+                    // Jolt computes via the compound aggregation.
+                    float partMass = part.mass + part.GetResourceMass();
+                    float partVol = 0f;
+                    for (int i = 0; i < _partSubsScratch.Count; ++i)
+                        partVol += SubShapeVolume(_partSubsScratch[i]);
+                    float density = (partMass > 1e-9f && partVol > 1e-9f)
+                        ? partMass / partVol
+                        : 0f;  // sentinel: native uses Jolt default
+
+                    for (int i = 0; i < _partSubsScratch.Count; ++i)
+                    {
+                        var sub = _partSubsScratch[i];
+                        sub.Density = density;
                         subShapes.Add(sub);
                         subShapeToPart.Add(partIdx);
+                    }
+                }
+                // Spawn snapshot: log this part's transform pose and
+                // each collider's WORLD AABB, so we can correlate per-
+                // part placement with the launch-time pad geometry.
+                Debug.Log(LogPrefix + string.Format(
+                    "  part[{0}] '{1}': {2} colliders → {3} sub-shapes, mass={4:F3}t, transform={5}, partLocal={6}",
+                    partIdx,
+                    part.partInfo != null ? part.partInfo.name : part.name,
+                    colliders != null ? colliders.Length : 0,
+                    _partSubsScratch.Count,
+                    part.mass + part.GetResourceMass(),
+                    part.transform.position.ToString("F4"),
+                    offset.LocalPos.ToString("F4")));
+                if (colliders != null)
+                {
+                    for (int ci = 0; ci < colliders.Length; ++ci)
+                    {
+                        var c = colliders[ci];
+                        if (c == null) continue;
+                        bool used = c.enabled && !c.isTrigger
+                                    && c.gameObject != null
+                                    && c.gameObject.activeInHierarchy
+                                    && c.GetType().Name != "WheelCollider";
+                        Debug.Log(LogPrefix + string.Format(
+                            "    [{0}] {1} type={2} convex={3} used={4} bounds.center={5} extents={6}",
+                            ci, c.name, c.GetType().Name,
+                            (c is MeshCollider mci) ? mci.convex.ToString() : "n/a",
+                            used,
+                            c.bounds.center.ToString("F3"),
+                            c.bounds.extents.ToString("F3")));
                     }
                 }
                 partIdx++;
@@ -306,6 +365,72 @@ namespace Longeron.Integration
             public float P0, P1, P2;
             // ConvexHull: vertices baked into part-local frame, xyz packed.
             public float[] Vertices;
+            // Convex-hull volume cached at TryClassify time (computed
+            // from the source mesh's triangles via the divergence
+            // theorem). Avoids C# polyhedron-volume code in the hot
+            // density loop.
+            public float HullVolume;
+            // Density set per part in WriteBodyForVessel after all this
+            // part's sub-shapes are classified (density = part_mass /
+            // Σ sub-shape volume so the per-part mass distributes
+            // proportionally to volume across colliders). Wire format
+            // attaches it to each AppendShape so Jolt's CompoundShape
+            // aggregates body mass + CoM + inertia from per-sub-shape
+            // MassProperties. Density 0 = use Jolt default 1000 kg/m³.
+            public float Density;
+        }
+
+        // Per-part scratch list — collects this part's classified sub-
+        // shapes so we can compute Σ volume → density before pushing
+        // them onto the body's flat sub-shape stream. Cleared per part.
+        static readonly List<SubShape> _partSubsScratch = new List<SubShape>(8);
+
+        // Sub-shape volume (m³ in part-local frame after lossyScale
+        // bake). Used by WriteBodyForVessel to compute per-part
+        // density. Returns 0 for unsupported shape kinds; caller
+        // treats that as "skip volume contribution".
+        static float SubShapeVolume(SubShape s)
+        {
+            switch (s.Kind)
+            {
+                case ShapeKind.Box:
+                    // Box half-extents → 8 · hx · hy · hz.
+                    return 8f * s.P0 * s.P1 * s.P2;
+                case ShapeKind.Sphere:
+                    // 4/3 · π · r³.
+                    return (4f / 3f) * Mathf.PI * s.P0 * s.P0 * s.P0;
+                case ShapeKind.ConvexHull:
+                    return s.HullVolume;
+                default:
+                    return 0f;
+            }
+        }
+
+        // Closed-mesh volume via the divergence theorem: sum of signed
+        // tetrahedra (origin, v0, v1, v2) over every triangle. For a
+        // closed surface with outward-oriented faces this gives the
+        // enclosed volume; for nearly-convex KSP collider meshes it
+        // matches the convex hull's volume to within float precision.
+        // Returns the absolute value to be sign-agnostic about winding.
+        // Skips triangles whose indices reference outside `verts` —
+        // defensive against a caller that truncates verts but passes
+        // the original triangle indices.
+        static float ClosedMeshVolume(Vector3[] verts, int[] tris)
+        {
+            if (verts == null || tris == null) return 0f;
+            int vn = verts.Length;
+            float vol = 0f;
+            for (int i = 0; i + 2 < tris.Length; i += 3)
+            {
+                int i0 = tris[i], i1 = tris[i + 1], i2 = tris[i + 2];
+                if ((uint)i0 >= (uint)vn || (uint)i1 >= (uint)vn || (uint)i2 >= (uint)vn)
+                    continue;
+                Vector3 v0 = verts[i0];
+                Vector3 v1 = verts[i1];
+                Vector3 v2 = verts[i2];
+                vol += Vector3.Dot(v0, Vector3.Cross(v1, v2));
+            }
+            return Mathf.Abs(vol) / 6f;
         }
 
         static bool TryClassify(Collider col, Transform partXform, out SubShape sub)
@@ -367,10 +492,30 @@ namespace Longeron.Integration
                 var verts = sharedMesh.vertices;
                 if (verts == null || verts.Length == 0) return false;
 
-                // Bake the full mesh→part transform into each vertex —
-                // includes lossyScale, so non-uniformly scaled hulls are
-                // correctly reshaped before reaching Jolt.
-                int n = verts.Length;
+                // Compute hull volume on the FULL vertex set first —
+                // the triangle indices reference the original mesh, so
+                // truncating verts before this would IndexOutOfRange
+                // on any index above the cap. Transform every vert
+                // into part-local frame (the volume is invariant under
+                // rigid transforms but scales by lossyScale, so we
+                // need the same frame Jolt sees).
+                int rawCount = verts.Length;
+                var localVertsFull = new Vector3[rawCount];
+                for (int i = 0; i < rawCount; i++)
+                {
+                    Vector3 worldV = mesh.transform.TransformPoint(verts[i]);
+                    localVertsFull[i] = partXform.InverseTransformPoint(worldV);
+                }
+                int[] tris = sharedMesh.triangles;
+                float hullVol = ClosedMeshVolume(localVertsFull, tris);
+
+                // Now truncate for the wire format. Jolt's convex-hull
+                // builder caps vertex count for performance; the
+                // truncated set still bounds an approximate hull. The
+                // volume (above) is from the FULL set, so density
+                // stays accurate even when the wire-side hull is
+                // simplified.
+                int n = rawCount;
                 if (n > ShapeLimits.MaxConvexHullVertices)
                 {
                     Debug.LogWarning(LogPrefix + $"MeshCollider has {n} verts; truncating to {ShapeLimits.MaxConvexHullVertices}");
@@ -379,11 +524,9 @@ namespace Longeron.Integration
                 var packed = new float[n * 3];
                 for (int i = 0; i < n; i++)
                 {
-                    Vector3 worldV = mesh.transform.TransformPoint(verts[i]);
-                    Vector3 localV = partXform.InverseTransformPoint(worldV);
-                    packed[i * 3 + 0] = localV.x;
-                    packed[i * 3 + 1] = localV.y;
-                    packed[i * 3 + 2] = localV.z;
+                    packed[i * 3 + 0] = localVertsFull[i].x;
+                    packed[i * 3 + 1] = localVertsFull[i].y;
+                    packed[i * 3 + 2] = localVertsFull[i].z;
                 }
 
                 sub.Kind = ShapeKind.ConvexHull;
@@ -391,6 +534,7 @@ namespace Longeron.Integration
                 sub.PosX = 0; sub.PosY = 0; sub.PosZ = 0;
                 sub.RotX = 0; sub.RotY = 0; sub.RotZ = 0; sub.RotW = 1;
                 sub.Vertices = packed;
+                sub.HullVolume = hullVol;
                 return true;
             }
 
@@ -414,19 +558,22 @@ namespace Longeron.Integration
                     input.AppendShapeBox(
                         s.PosX, s.PosY, s.PosZ,
                         s.RotX, s.RotY, s.RotZ, s.RotW,
-                        s.P0, s.P1, s.P2);
+                        s.P0, s.P1, s.P2,
+                        density: s.Density);
                     break;
                 case ShapeKind.Sphere:
                     input.AppendShapeSphere(
                         s.PosX, s.PosY, s.PosZ,
                         s.RotX, s.RotY, s.RotZ, s.RotW,
-                        s.P0);
+                        s.P0,
+                        density: s.Density);
                     break;
                 case ShapeKind.ConvexHull:
                     input.AppendShapeConvexHull(
                         s.PosX, s.PosY, s.PosZ,
                         s.RotX, s.RotY, s.RotZ, s.RotW,
-                        s.Vertices);
+                        s.Vertices,
+                        density: s.Density);
                     break;
             }
         }

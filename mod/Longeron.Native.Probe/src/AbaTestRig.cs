@@ -229,9 +229,12 @@ namespace Longeron.Native.Probe
             foreach (var p in _parts) totalMass += p.Mass;
 
             // BodyCreate — compound shape, one box sub-shape per part
-            // located at its com_local. Dynamic by default (so ABA can
-            // ModifyShapes per tick); Kinematic when the test wants the
-            // Jolt body's motion frozen (analytic equilibrium tests).
+            // located at its com_local. Per-shape density = part_mass /
+            // box_volume so each sub-shape carries the right mass; Jolt's
+            // CompoundShape::GetMassProperties() then aggregates body
+            // mass / CoM / inertia for free. Dynamic by default (so ABA
+            // can ModifyShapes per tick); Kinematic when the test wants
+            // the Jolt body's motion frozen (analytic equilibrium tests).
             BodyType bodyType = _kinematic ? BodyType.Kinematic : BodyType.Dynamic;
             _rig.World.Input.BeginBodyCreate(
                 Handle, bodyType, Layer.Kinematic,
@@ -241,10 +244,15 @@ namespace Longeron.Native.Probe
             for (int i = 0; i < _parts.Count; ++i)
             {
                 var p = _parts[i];
+                float volume = 8f * p.HalfX * p.HalfY * p.HalfZ;
+                float density = (volume > 1e-9f && p.Mass > 1e-9f)
+                    ? p.Mass / volume
+                    : 0f;
                 _rig.World.Input.AppendShapeBox(
                     p.ComLocalX, p.ComLocalY, p.ComLocalZ,
                     0, 0, 0, 1,
-                    p.HalfX, p.HalfY, p.HalfZ);
+                    p.HalfX, p.HalfY, p.HalfZ,
+                    density: density);
             }
 
             // VesselTreeUpdate — topology + compliance.
