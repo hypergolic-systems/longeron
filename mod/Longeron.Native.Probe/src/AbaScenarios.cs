@@ -612,6 +612,255 @@ namespace Longeron.Native.Probe
             }
         }
 
+        // -- M5 -------------------------------------------------------------
+        //
+        // Booster + side masses: a 3-part central stack with two side
+        // masses attached radially to the middle part.
+        //
+        //   Root   (idx 0): com (0, 0, 0).            Mass kStackMass.
+        //   Middle (idx 1): com (0, 1, 0). attach (0,0.5,0).  Joint to root.
+        //   Top    (idx 2): com (0, 2, 0). attach (0,1.5,0).  Joint to middle.
+        //   SideA  (idx 3): com (1, 1, 0). attach (0.5,1,0).  Joint to middle.
+        //   SideB  (idx 4): com (-1, 1, 0). attach (-0.5,1,0). Joint to middle.
+        //
+        // Side mass = ½ central. The side joints' axes are radial
+        // (parent CoM → child anchor): (+0.5,1,0)→(+0.5,0,0) for A,
+        // (-0.5,1,0)→(-0.5,0,0) for B (after subtracting middle's CoM
+        // (0,1,0)).
+
+        private const float kSideMass = 0.5f;
+        private const float kSidePartIAnchor = (1.0f / 6.0f) * kSideMass
+                                              + kSideMass * 0.5f * 0.5f;
+
+        private static BodyHandle BuildBoosterPlusSides(
+            AbaTestRig rig, float kAng, float cAng, bool kinematic = true)
+        {
+            var b = rig.Vessel().At(0, 100, 0);
+            if (kinematic) b = b.Kinematic();
+            return b
+                .Root(mass: kStackMass)
+                .Child(parentIdx: 0, mass: kStackMass,
+                       comX: 0f, comY: 1f, comZ: 0f,
+                       attachX: 0f, attachY: 0.5f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Child(parentIdx: 1, mass: kStackMass,
+                       comX: 0f, comY: 2f, comZ: 0f,
+                       attachX: 0f, attachY: 1.5f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Child(parentIdx: 1, mass: kSideMass,
+                       comX: 1f, comY: 1f, comZ: 0f,
+                       attachX: 0.5f, attachY: 1f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Child(parentIdx: 1, mass: kSideMass,
+                       comX: -1f, comY: 1f, comZ: 0f,
+                       attachX: -0.5f, attachY: 1f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Build();
+        }
+
+        /// <summary>
+        /// M5.1: booster + side masses at rest under axial gravity.
+        /// Side joints (idx 3, 4) bear no axial load (their axes are
+        /// radial — perpendicular to gravity). The central stack joints
+        /// bear weight plus the share routed through the side-mass
+        /// anchors (which connect to the middle part).
+        /// </summary>
+        public static void Booster_AtRest_AxialGravity_Stable()
+        {
+            const float kAng = 10000f;
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildBoosterPlusSides(rig, kAng: kAng, cAng: cAng);
+
+                for (int settle = 0; settle < 200; ++settle)
+                {
+                    // Per-part gravity (kinematic vessel):
+                    //   Root, middle, top: kStackMass.
+                    //   Side A (idx 3), Side B (idx 4): kSideMass.
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: 0, fy: -kStackMass * kStackGrav, fz: 0,
+                        px: 0, py: 100, pz: 0, partIdx: 0);
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: 0, fy: -kStackMass * kStackGrav, fz: 0,
+                        px: 0, py: 101, pz: 0, partIdx: 1);
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: 0, fy: -kStackMass * kStackGrav, fz: 0,
+                        px: 0, py: 102, pz: 0, partIdx: 2);
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: 0, fy: -kSideMass * kStackGrav, fz: 0,
+                        px: 1, py: 101, pz: 0, partIdx: 3);
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: 0, fy: -kSideMass * kStackGrav, fz: 0,
+                        px: -1, py: 101, pz: 0, partIdx: 4);
+                    rig.Step(kDt);
+                }
+
+                // Side masses: their joint axis is radial X. Gravity
+                // (-Y) is perpendicular to axis → no axial component.
+                // Just verify no oscillation (q stays small).
+                for (ushort idx = 3; idx <= 4; ++idx)
+                {
+                    var pp = rig.PartPose(v.Id, idx);
+                    float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                              pp.DeltaRotZ, pp.DeltaRotW);
+                    AssertTrue(ang < 0.01f,
+                        $"side mass {idx} oscillating under axial gravity: |Δθ|={ang:F4} rad");
+                }
+
+                // Central stack joints carry weight. Bottom joint sees
+                // (top + middle + side_A + side_B + their gravity).
+                // Approximate: 2·kStackMass + 2·kSideMass = 3 t worth.
+                var jw1 = rig.JointWrench(v.Id, 1);
+                float expected1 = (2f * kStackMass + 2f * kSideMass) * kStackGrav;
+                float relErr1 = Math.Abs(jw1.FX - expected1) / expected1;
+                AssertTrue(relErr1 < 0.02f,
+                    $"bottom joint axial = {jw1.FX:F3} kN, expected {expected1:F3} (relErr={relErr1:P2})");
+            }
+        }
+
+        /// <summary>
+        /// M5.2: booster under steady rotation. The v1 XPBD-style
+        /// implementation failed this test — under SAS / vessel-frame
+        /// rotation, side masses' q_joint diverged from identity
+        /// because the per-link integration in vessel frame and the
+        /// angular spring were fighting each other.
+        ///
+        /// Pinocchio's reduced-coord ABA handles this by construction:
+        /// q is integrated in joint-relative coordinates, so any
+        /// rigid-body rotation of the vessel doesn't enter the joint
+        /// state. Centripetal stress (ω×ω×r per part) does enter
+        /// F_flex — but its torque about each joint anchor stays
+        /// small for moderate ω and stiff joints.
+        /// </summary>
+        public static void Booster_SteadyRotation_JointsStayPinned()
+        {
+            const float kAng = 10000f;
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+            const float omega_z = 1.0f;       // rad/s steady spin
+
+            using (var rig = new AbaTestRig())
+            {
+                // Kinematic body with ang_vel set; Jolt integrates the
+                // pose forward each tick. ABA's α finite-diff = 0 (steady
+                // ω); F_flex captures only centripetal contribution.
+                var v = BuildBoosterPlusSides(rig, kAng: kAng, cAng: cAng);
+
+                // Set initial ang_vel — kinematic pose stays at start
+                // and Jolt advances it each tick using the velocity.
+                rig.World.Input.WriteSetKinematicPose(
+                    v, posX: 0, posY: 100, posZ: 0,
+                    rotX: 0, rotY: 0, rotZ: 0, rotW: 1,
+                    linX: 0, linY: 0, linZ: 0,
+                    angX: 0, angY: 0, angZ: omega_z);
+
+                // Step for 100 ticks (= 2 s real, ≈ 2 rad rotation).
+                // Long enough for any v1-style divergent flex to
+                // accumulate visibly.
+                for (int i = 0; i < 100; ++i) rig.Step(kDt);
+
+                // Side masses: q_joint should stay near identity. The
+                // analytic centripetal-induced equilibrium is
+                // (com_in_body × F_centrifugal) / K_ang. For ω = 1 rad/s,
+                // r_side = (1,1,0), com_in_body_side = (0.5,0,0):
+                //   ω×(ω×r) = (-1,-1,0). F_inertial = m·(-1,-1,0).
+                //   F_flex = -F_inertial = m·(1,1,0).
+                //   M = com_in_body × F_flex = (0,0,0.5·m).
+                //   q = M / K_ang. For m=0.5, K=10000: q ≈ 2.5e-5 rad ≈ 0.0014°.
+                // Threshold: 0.5° = 0.00873 rad. Plenty of margin.
+                for (ushort idx = 3; idx <= 4; ++idx)
+                {
+                    var pp = rig.PartPose(v.Id, idx);
+                    // Compute joint-relative q (vs vessel-frame delta_rot).
+                    // For Pinocchio's reduced coords, the joint q is
+                    // R_v[parent].conj() * R_v[child]. Since R_v[parent]
+                    // (the middle part) might also have flex, we use
+                    // the cumulative delta_rot which is good enough at
+                    // these small magnitudes.
+                    float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                              pp.DeltaRotZ, pp.DeltaRotW);
+                    AssertTrue(ang < 0.00873f,   // 0.5°
+                        $"under steady rotation, side mass {idx}: |Δθ|={ang:F4} rad (>0.5°)");
+                }
+            }
+        }
+
+        /// <summary>
+        /// M5.3: gimbal-style offset thrust. We approximate an engine
+        /// gimbaled 5° off-axis by attributing a tilted thrust vector
+        /// to the middle part (the "engine" stand-in) with the
+        /// application point at the root's bottom face — i.e., 1.5 m
+        /// below the middle's CoM. The lever-arm geometry is what
+        /// produces a bending moment at the bottom joint:
+        ///     T_ext_at_middle = (point - com_middle) × F
+        ///                     = (0, -1.5, 0) × (Fx, Fy, 0)
+        ///                     = (0, 0, 1.5·Fx)
+        ///
+        /// Verifies (a) bend response is observable, (b) bounded, (c)
+        /// side masses don't diverge from rigid-body kinematics.
+        /// </summary>
+        public static void Booster_GimbalOffsetThrust_BendBounded()
+        {
+            const float kAng = 1000f;            // softer for observable bend
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+            const float Fmag = 50.0f;            // kN
+            float angleRad = (float)(5.0 * Math.PI / 180.0);
+            float Fx = Fmag * (float)Math.Sin(angleRad);
+            float Fy = Fmag * (float)Math.Cos(angleRad);
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildBoosterPlusSides(rig, kAng: kAng, cAng: cAng);
+
+                // Sustained thrust attributed to the middle part,
+                // applied at the root's bottom face. The application
+                // point being 1.5m below middle's CoM is what generates
+                // the bending moment.
+                for (int i = 0; i < 200; ++i)
+                {
+                    rig.World.Input.WriteForceAtPosition(
+                        v, fx: Fx, fy: Fy, fz: 0,
+                        px: 0, py: 100 - 0.5, pz: 0,
+                        partIdx: 1);
+                    rig.Step(kDt);
+                }
+
+                // Middle part should bend in the +Z direction (the
+                // moment generated by the lever-arm gimbal force).
+                // Top inherits middle's rotation cumulatively.
+                var pp_middle = rig.PartPose(v.Id, 1);
+                var pp_top    = rig.PartPose(v.Id, 2);
+                float angMiddle = AxisAngleMag(pp_middle.DeltaRotX, pp_middle.DeltaRotY,
+                                                pp_middle.DeltaRotZ, pp_middle.DeltaRotW);
+                float angTop    = AxisAngleMag(pp_top.DeltaRotX, pp_top.DeltaRotY,
+                                                pp_top.DeltaRotZ, pp_top.DeltaRotW);
+                AssertTrue(angMiddle > 1e-3f,
+                    $"middle should show bend response to gimbal: |Δθ|={angMiddle:E2}");
+                AssertTrue(angTop >= angMiddle - 1e-4f,
+                    $"top should inherit middle's bend: top |Δθ|={angTop:F4}, middle |Δθ|={angMiddle:F4}");
+                AssertTrue(angTop < 0.5f,
+                    $"top bend exceeds bound: |Δθ|={angTop:F4} rad (~{angTop*180.0f/(float)Math.PI:F1}°)");
+
+                // Side masses should NOT diverge — they're attached to
+                // the middle part rigidly, so their cumulative
+                // delta_rot should track the middle part's bend
+                // (since they rotate WITH the middle, not relative to
+                // it). The joint-relative q_side stays near identity.
+                for (ushort idx = 3; idx <= 4; ++idx)
+                {
+                    var pp = rig.PartPose(v.Id, idx);
+                    float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                              pp.DeltaRotZ, pp.DeltaRotW);
+                    // Side's delta_rot should be CLOSE to the middle's
+                    // delta_rot (within ~1° absolute, since we're using
+                    // cumulative delta_rot, not joint-relative).
+                    AssertTrue(Math.Abs(ang - angMiddle) < 0.02f,
+                        $"side mass {idx} not tracking middle's rotation: side |Δθ|={ang:F4}, middle |Δθ|={angMiddle:F4}");
+                }
+            }
+        }
+
         // -- helpers --------------------------------------------------------
 
         private static float Mag(float x, float y, float z)

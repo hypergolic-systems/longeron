@@ -49,6 +49,9 @@ namespace Longeron.Native.Probe
             Run("M4.2 3-stack axial gravity: compression = m_above·g",       AbaScenarios.ThreeStack_AxialGravity_CompressionMatchesAnalytic);
             Run("M4.3 3-stack lateral force: bend = Σ(lever)·F/K",            AbaScenarios.ThreeStack_LateralForce_BendMatchesAnalytic);
             Run("M4.4 3-stack transient release damps to rest", AbaScenarios.ThreeStack_TransientRelease_DampsToRest);
+            Run("M5.1 booster at rest under axial gravity",     AbaScenarios.Booster_AtRest_AxialGravity_Stable);
+            Run("M5.2 booster steady rotation: side joints stay pinned", AbaScenarios.Booster_SteadyRotation_JointsStayPinned);
+            Run("M5.3 booster gimbal offset thrust: bend bounded",       AbaScenarios.Booster_GimbalOffsetThrust_BendBounded);
 
             Console.WriteLine();
             if (sFailures == 0)
