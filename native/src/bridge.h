@@ -3,8 +3,8 @@
 // All symbols here are extern "C" with stable layout. C# pins input/output
 // buffers and calls longeron_step() once per FixedUpdate; the bridge
 // parses the input record stream, advances the Jolt world by dt, and
-// emits an output record stream. See PLAN.md / CLAUDE.md for the
-// per-record schema and ownership split.
+// emits an output record stream. See CLAUDE.md for the per-record
+// schema and ownership split.
 
 #ifndef LONGERON_BRIDGE_H
 #define LONGERON_BRIDGE_H

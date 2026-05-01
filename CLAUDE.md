@@ -100,9 +100,12 @@ Unity rigidbodies become kinematic proxies driven by Jolt for the
 benefit of stock + modded code that reads `rb.velocity`,
 `rb.position`, etc.
 
-The implementation plan is at
-`/Users/alx/.claude/plans/splendid-dancing-flute.md` (also referred
-to as `PLAN.md` once committed).
+The original phased implementation plan lived at
+`/Users/alx/.claude/plans/splendid-dancing-flute.md`. The bulk of
+that work — Jolt bridge, single-body vessel pivot, PQS terrain
+mirroring, and Pinocchio-backed Featherstone ABA for inter-part
+flex — has shipped. Architectural intent below is what the running
+system implements; phase numbers in older comments are historical.
 
 ## Architecture
 
