@@ -370,6 +370,248 @@ namespace Longeron.Native.Probe
             }
         }
 
+        // -- M4 -------------------------------------------------------------
+        //
+        // Three-part stack tower extending along +Y. Each part is a unit
+        // box; the stack spans (0,0,0) → (0,2,0) with 0.5m air-gap
+        // overlap at each joint.
+        //
+        //   Root   (idx 0): com (0,0,0), half (0.5,0.5,0.5).
+        //   Middle (idx 1): com (0,1,0), attach (0,0.5,0).  Joint to root.
+        //   Top    (idx 2): com (0,2,0), attach (0,1.5,0).  Joint to middle.
+        //
+        // Joint axis convention (parent CoM → child anchor):
+        //   bottom joint (root → middle): axis = +Y in vessel frame.
+        //   middle joint (middle → top):  axis = +Y in vessel frame.
+        // So JointWrench.FX (axial in joint frame) is +Y in vessel frame.
+        //   FX > 0 → compression (stack squeezed together)
+        //   FX < 0 → tension     (stack pulled apart)
+
+        private const float kStackMass = 1.0f;   // tonnes per part
+        private const float kStackGrav = 9.81f;  // m/s² (KSP-realistic g)
+
+        // Effective rotational inertia of one stack-part about its joint
+        // anchor: I_c + m·L² where L = distance(com, anchor) = 0.5 m.
+        private const float kStackPartIAnchor = (1.0f / 6.0f)
+                                              + kStackMass * 0.5f * 0.5f;
+
+        private static BodyHandle BuildThreeStack(
+            AbaTestRig rig, float kAng, float cAng, bool kinematic = true)
+        {
+            var b = rig.Vessel().At(0, 100, 0);
+            if (kinematic) b = b.Kinematic();
+            return b
+                .Root(mass: kStackMass)
+                .Child(parentIdx: 0, mass: kStackMass,
+                       comX: 0f, comY: 1f, comZ: 0f,
+                       attachX: 0f, attachY: 0.5f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Child(parentIdx: 1, mass: kStackMass,
+                       comX: 0f, comY: 2f, comZ: 0f,
+                       attachX: 0f, attachY: 1.5f, attachZ: 0f,
+                       kAng: kAng, cAng: cAng)
+                .Build();
+        }
+
+        /// <summary>
+        /// M4.1: 3-part stack at rest, no forces. Both non-root parts
+        /// stay unflexed; joint wrenches near zero.
+        /// </summary>
+        public static void ThreeStack_AtRest_NoFlex()
+        {
+            using (var rig = new AbaTestRig())
+            {
+                float cAng = 2f * (float)Math.Sqrt(1000f * kStackPartIAnchor);
+                var v = BuildThreeStack(rig, kAng: 1000f, cAng: cAng);
+
+                for (int i = 0; i < kWarmupSteps + 50; ++i) rig.Step(kDt);
+
+                for (ushort idx = 1; idx <= 2; ++idx)
+                {
+                    var pp = rig.PartPose(v.Id, idx);
+                    float pos = Mag(pp.DeltaPosX, pp.DeltaPosY, pp.DeltaPosZ);
+                    float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                              pp.DeltaRotZ, pp.DeltaRotW);
+                    AssertTrue(pos < 1e-3f,
+                        $"part {idx}: at-rest 3-stack drifted, |Δp|={pos:E2} m");
+                    AssertTrue(ang < 1e-3f,
+                        $"part {idx}: at-rest 3-stack drifted, |Δθ|={ang:E2} rad");
+                }
+            }
+        }
+
+        /// <summary>
+        /// M4.2: 3-part stack under axial gravity (-Y per part, applied
+        /// to the kinematic vessel as F_ext on each part). The stack
+        /// stays straight (no lateral component) but each joint sees
+        /// compression from the parts above it:
+        ///   bottom joint: 2 parts above × m·g
+        ///   middle joint: 1 part  above × m·g
+        /// JointWrench.FX (axial, +compression) matches to 1%.
+        /// </summary>
+        public static void ThreeStack_AxialGravity_CompressionMatchesAnalytic()
+        {
+            // Stiff joints — under pure axial load there's no bending
+            // moment to deflect them, but the test isolates the axial
+            // force calculation. Make them stiff anyway to keep the
+            // stack pristine.
+            const float kAng = 10000f;
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildThreeStack(rig, kAng: kAng, cAng: cAng);
+
+                // Sustained per-part gravity. 200 ticks = 4 s, comfortably
+                // past any transient.
+                for (int settle = 0; settle < 200; ++settle)
+                {
+                    for (ushort idx = 0; idx <= 2; ++idx)
+                    {
+                        rig.World.Input.WriteForceAtPosition(
+                            v,
+                            fx: 0, fy: -kStackMass * kStackGrav, fz: 0,
+                            // part i's CoM in world frame: (0, 100+i, 0).
+                            px: 0, py: 100 + idx, pz: 0,
+                            partIdx: idx);
+                    }
+                    rig.Step(kDt);
+                }
+
+                // Bottom joint (between root and middle, part_idx=1):
+                // RNEA computes the wrench the PARENT transmits to the
+                // child to hold the subtree against external forces.
+                // Under -Y gravity the parent must push child +Y →
+                // axial-component f·axis = +m_above·g (compression).
+                var jw1 = rig.JointWrench(v.Id, 1);
+                float expected1 = 2f * kStackMass * kStackGrav;
+                float relErr1 = Math.Abs(jw1.FX - expected1) / expected1;
+                AssertTrue(relErr1 < 0.01f,
+                    $"bottom joint axial = {jw1.FX:F3} kN, expected {expected1:F3} (relErr={relErr1:P2})");
+
+                var jw2 = rig.JointWrench(v.Id, 2);
+                float expected2 = 1f * kStackMass * kStackGrav;
+                float relErr2 = Math.Abs(jw2.FX - expected2) / expected2;
+                AssertTrue(relErr2 < 0.01f,
+                    $"middle joint axial = {jw2.FX:F3} kN, expected {expected2:F3} (relErr={relErr2:P2})");
+            }
+        }
+
+        /// <summary>
+        /// M4.3: 3-part stack under lateral force (+X per part). Each
+        /// joint deflects to balance the moment from the parts above:
+        ///   q_bottom = (lever_middle + lever_top) · F / K
+        ///            = (0.5 + 1.5) · F / K = 2·F / K
+        ///   q_middle = lever_top · F / K = 0.5·F / K
+        /// Cumulative vessel-frame rotations:
+        ///   middle (idx 1): q_bottom
+        ///   top    (idx 2): q_bottom + q_middle
+        /// Tolerance 5%.
+        /// </summary>
+        public static void ThreeStack_LateralForce_BendMatchesAnalytic()
+        {
+            const float kAng  = 1000f;          // softer to get measurable bend
+            const float Fx_kN = 10f;            // 10 kN lateral per part
+            float cAng = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+
+            float qBottom = (0.5f + 1.5f) * Fx_kN / kAng;   // = 0.02 rad
+            float qMiddle = 0.5f * Fx_kN / kAng;             // = 0.005 rad
+            float angMiddleExpected = qBottom;               // ≈ 0.02
+            float angTopExpected    = qBottom + qMiddle;     // ≈ 0.025
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildThreeStack(rig, kAng: kAng, cAng: cAng);
+
+                // Critical damping settles quickly: ~5/ω_n is comfortable.
+                // ω_n ≈ √(K/I) = √(1000/0.42) ≈ 49 rad/s ⇒ 5/ω_n ≈ 0.1 s.
+                // Use 200 ticks = 4 s ≫ 0.1 s for safety.
+                for (int settle = 0; settle < 200; ++settle)
+                {
+                    for (ushort idx = 0; idx <= 2; ++idx)
+                    {
+                        rig.World.Input.WriteForceAtPosition(
+                            v, fx: Fx_kN, fy: 0, fz: 0,
+                            px: 0, py: 100 + idx, pz: 0,
+                            partIdx: idx);
+                    }
+                    rig.Step(kDt);
+                }
+
+                var pp1 = rig.PartPose(v.Id, 1);
+                var pp2 = rig.PartPose(v.Id, 2);
+                float angObs1 = AxisAngleMag(pp1.DeltaRotX, pp1.DeltaRotY,
+                                              pp1.DeltaRotZ, pp1.DeltaRotW);
+                float angObs2 = AxisAngleMag(pp2.DeltaRotX, pp2.DeltaRotY,
+                                              pp2.DeltaRotZ, pp2.DeltaRotW);
+
+                float relErr1 = Math.Abs(angObs1 - angMiddleExpected) / angMiddleExpected;
+                float relErr2 = Math.Abs(angObs2 - angTopExpected)    / angTopExpected;
+                AssertTrue(relErr1 < 0.05f,
+                    $"middle bend |φ|={angObs1:F4} rad, expected {angMiddleExpected:F4} (relErr={relErr1:P2})");
+                AssertTrue(relErr2 < 0.05f,
+                    $"top bend |φ|={angObs2:F4} rad, expected {angTopExpected:F4} (relErr={relErr2:P2})");
+            }
+        }
+
+        /// <summary>
+        /// M4.4: 3-part stack transient release. Apply lateral force to
+        /// develop bend, release, verify the chain damps back to rest
+        /// within ~5 critical-damping time constants.
+        /// </summary>
+        public static void ThreeStack_TransientRelease_DampsToRest()
+        {
+            const float kAng  = 1000f;
+            const float Fx_kN = 10f;
+            float omega_n = (float)Math.Sqrt(kAng / kStackPartIAnchor);
+            float cAng    = 2f * (float)Math.Sqrt(kAng * kStackPartIAnchor);
+
+            using (var rig = new AbaTestRig())
+            {
+                var v = BuildThreeStack(rig, kAng: kAng, cAng: cAng);
+
+                // Load phase: 30 ticks of lateral force to develop bend.
+                for (int i = 0; i < 30; ++i)
+                {
+                    for (ushort idx = 0; idx <= 2; ++idx)
+                    {
+                        rig.World.Input.WriteForceAtPosition(
+                            v, fx: Fx_kN, fy: 0, fz: 0,
+                            px: 0, py: 100 + idx, pz: 0,
+                            partIdx: idx);
+                    }
+                    rig.Step(kDt);
+                }
+
+                // Sanity: confirm we DID develop bend (else the test is meaningless).
+                var ppLoaded = rig.PartPose(v.Id, 2);
+                float bentAngle = AxisAngleMag(ppLoaded.DeltaRotX, ppLoaded.DeltaRotY,
+                                                ppLoaded.DeltaRotZ, ppLoaded.DeltaRotW);
+                AssertTrue(bentAngle > 0.005f,
+                    $"load phase did not develop bend; |φ|={bentAngle:F4}");
+
+                // Release phase: no forces, settle. The multi-link
+                // chain's lower-order modes are slower than a single
+                // pendulum's: each joint's effective inertia is the
+                // sum-of-parallel-axis of all subtree parts, which
+                // exceeds the single-part kStackPartIAnchor we used to
+                // compute cAng. So C_ang is under-critical for the
+                // chain modes; use a generous 30/ω_n (single-link τ as
+                // upper bound on chain τ) for the settle window.
+                int settleSteps = (int)(30f / omega_n / kDt);
+                for (int i = 0; i < settleSteps; ++i) rig.Step(kDt);
+
+                for (ushort idx = 1; idx <= 2; ++idx)
+                {
+                    var pp = rig.PartPose(v.Id, idx);
+                    float ang = AxisAngleMag(pp.DeltaRotX, pp.DeltaRotY,
+                                              pp.DeltaRotZ, pp.DeltaRotW);
+                    AssertTrue(ang < 0.005f,
+                        $"part {idx} did not damp to rest after release: |Δθ|={ang:F4}");
+                }
+            }
+        }
+
         // -- helpers --------------------------------------------------------
 
         private static float Mag(float x, float y, float z)

@@ -45,6 +45,10 @@ namespace Longeron.Native.Probe
             Run("M3.2 pendulum equilibrium = F·L/K_ang",        AbaScenarios.Pendulum_EquilibriumMatchesAnalytic);
             Run("M3.3 undamped period = 2π√(I/K)",              AbaScenarios.Pendulum_UndampedPeriodMatchesAnalytic);
             Run("M3.4 critical-damped decay to rest",           AbaScenarios.Pendulum_CriticalDampingDecaysToRest);
+            Run("M4.1 3-stack at rest stays unflexed",          AbaScenarios.ThreeStack_AtRest_NoFlex);
+            Run("M4.2 3-stack axial gravity: compression = m_above·g",       AbaScenarios.ThreeStack_AxialGravity_CompressionMatchesAnalytic);
+            Run("M4.3 3-stack lateral force: bend = Σ(lever)·F/K",            AbaScenarios.ThreeStack_LateralForce_BendMatchesAnalytic);
+            Run("M4.4 3-stack transient release damps to rest", AbaScenarios.ThreeStack_TransientRelease_DampsToRest);
 
             Console.WriteLine();
             if (sFailures == 0)

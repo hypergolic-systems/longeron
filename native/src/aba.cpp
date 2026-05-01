@@ -162,6 +162,16 @@ void RebuildModel(PinState& ps, const VesselTree& tree) {
         ps.model.appendBodyToJoint(jid, bodyI, pinocchio::SE3::Identity());
     }
 
+    // Disable Pinocchio's built-in gravity. Longeron handles gravity
+    // upstream — gravitational acceleration is part of the Jolt body's
+    // CoM motion (the a_body finite-diff feeds the F_inertial subtraction
+    // above), and per-part lift / drag / thrust come in via
+    // tree.ext_force. If we left model.gravity at its non-zero default,
+    // Pinocchio would add a SECOND gravity term on top, double-counting.
+    // Verified empirically: ~0.098 rad of ghost deflection per body in
+    // M3.4 traces directly to (com_in_body × default_gravity) / K_ang.
+    ps.model.gravity.setZero();
+
     ps.data = pinocchio::Data(ps.model);
     ps.q   = pinocchio::neutral(ps.model);
     ps.v   = Eigen::VectorXd::Zero(ps.model.nv);

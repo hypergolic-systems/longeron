@@ -66,7 +66,15 @@ void TreeRegistry::Upsert(uint32_t body_id,
     t.last_a_body  = JPH::Vec3::sZero();
     t.last_alpha   = JPH::Vec3::sZero();
     t.diag_tick = 0;
-    ++t.topology_version;
+    // Globally-monotonic topology version so the Pinocchio model cache
+    // in aba.cpp (a module-level static map keyed by body_id) correctly
+    // invalidates when a fresh tree is Upserted on a body_id that
+    // previously hosted a different topology — which happens routinely
+    // across separate Probe test rigs that recycle body_ids. A
+    // per-tree `++t.topology_version` would collide at version=1
+    // across rigs and silently reuse the wrong Model.
+    static uint64_t s_next_topology_version = 0;
+    t.topology_version = ++s_next_topology_version;
 }
 
 void TreeRegistry::Erase(uint32_t body_id) {
